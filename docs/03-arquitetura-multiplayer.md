@@ -82,17 +82,11 @@ Client
 O spawn de até 15 players é coordenado pelo `PlayerSpawnCoordinator` no Host:
 
 ```csharp
-// Fluxo de spawn
 void OnClientConnected(ulong clientId)
 {
-    // 1. Escolhe ponto de spawn disponível
     Vector3 spawnPoint = GetAvailableSpawnPoint();
-    
-    // 2. Spawna o PlayerNetworkObject com ownership do client
     var playerObj = Instantiate(playerPrefab, spawnPoint, Quaternion.identity);
     playerObj.GetComponent<NetworkObject>().SpawnAsPlayerObject(clientId);
-    
-    // 3. PlayerNetworkObject inicializa com valores padrão
 }
 ```
 
@@ -102,30 +96,25 @@ void OnClientConnected(ulong clientId)
 
 ## NetworkVariables do Projeto
 
-Lista completa de `NetworkVariable` planejadas:
-
 ### No Player (`PlayerNetworkSync.cs`)
 
 ```csharp
-// Visíveis por todos — usadas para gameplay
-public NetworkVariable<PlayerRole> AssignedRole;      // papel (revelado só na reunião/morte)
-public NetworkVariable<bool> IsAlive;                 // vivo ou morto
-public NetworkVariable<bool> IsCarryingTorch;         // carregando tocha
-public NetworkVariable<CharacterColor> BodyColor;     // cor do personagem
-public NetworkVariable<int> HeadVariantIndex;         // índice do sprite de cabeça
-public NetworkVariable<int> BodyVariantIndex;         // índice do sprite de corpo
-public NetworkVariable<int> HandsVariantIndex;        // índice do sprite de mãos
-public NetworkVariable<int> FeetVariantIndex;         // índice do sprite de pés
-
-// Visível apenas para o próprio client (Owner)
-public NetworkVariable<int> TasksCompleted;
+public NetworkVariable<PlayerRole> AssignedRole;
+public NetworkVariable<bool> IsAlive;
+public NetworkVariable<bool> IsCarryingTorch;
+public NetworkVariable<CharacterColor> BodyColor;
+public NetworkVariable<int> HeadVariantIndex;
+public NetworkVariable<int> BodyVariantIndex;
+public NetworkVariable<int> HandsVariantIndex;
+public NetworkVariable<int> FeetVariantIndex;
+public NetworkVariable<int> TasksCompleted; // Owner only
 ```
 
 ### No NPC (`NPCNetworkSync.cs`)
 
 ```csharp
-public NetworkVariable<Vector2> Position;             // posição (Host atualiza, clients leem)
-public NetworkVariable<NPCBehaviorState> CurrentState; // idle, walkingToTask, doingTask, atTorch
+public NetworkVariable<Vector2> Position;
+public NetworkVariable<NPCBehaviorState> CurrentState;
 public NetworkVariable<CharacterColor> BodyColor;
 public NetworkVariable<int> HeadVariantIndex;
 public NetworkVariable<int> BodyVariantIndex;
@@ -136,17 +125,17 @@ public NetworkVariable<int> FeetVariantIndex;
 ### No Match (`MatchNetworkState.cs`)
 
 ```csharp
-public NetworkVariable<MatchState> CurrentState;      // estado atual da partida
-public NetworkVariable<int> TotalTasksCompleted;      // progresso global de missões
-public NetworkVariable<int> TotalTasksRequired;       // total necessário para vitória
-public NetworkVariable<int> InnocentsAlive;           // contagem de inocentes vivos
-public NetworkVariable<int> VampiresAlive;            // contagem de vampiros vivos
+public NetworkVariable<MatchState> CurrentState;
+public NetworkVariable<int> TotalTasksCompleted;
+public NetworkVariable<int> TotalTasksRequired;
+public NetworkVariable<int> InnocentsAlive;
+public NetworkVariable<int> VampiresAlive;
 ```
 
 ### Na Tocha (`TorchBehavior.cs`)
 
 ```csharp
-public NetworkVariable<bool> IsLit;                   // acesa ou apagada — TUDO que vai pela rede
+public NetworkVariable<bool> IsLit; // TUDO que vai pela rede para a tocha
 ```
 
 ---
@@ -156,31 +145,24 @@ public NetworkVariable<bool> IsLit;                   // acesa ou apagada — TU
 ### ServerRpcs (Client → Host)
 
 ```csharp
-// PlayerInteraction.cs
 [ServerRpc(RequireOwnership = true)]
 void RequestInteractTaskServerRpc(int taskId, ServerRpcParams rpcParams = default);
 
-// VampireRole.cs
 [ServerRpc(RequireOwnership = true)]
 void RequestKillTargetServerRpc(ulong targetClientId, ServerRpcParams rpcParams = default);
 
-// VampireRole.cs
 [ServerRpc(RequireOwnership = true)]
 void RequestBlowTorchServerRpc(ulong torchNetworkObjectId, ServerRpcParams rpcParams = default);
 
-// GuardRole.cs
 [ServerRpc(RequireOwnership = true)]
 void RequestShootTargetServerRpc(ulong targetClientId, ServerRpcParams rpcParams = default);
 
-// PlayerInteraction.cs
 [ServerRpc(RequireOwnership = true)]
 void RequestReportBodyServerRpc(ulong bodyClientId, ServerRpcParams rpcParams = default);
 
-// MeetingManager.cs
 [ServerRpc(RequireOwnership = true)]
 void RequestEmergencyMeetingServerRpc(ServerRpcParams rpcParams = default);
 
-// VotingSystem.cs
 [ServerRpc(RequireOwnership = true)]
 void SubmitVoteServerRpc(ulong votedForClientId, ServerRpcParams rpcParams = default);
 ```
@@ -188,112 +170,59 @@ void SubmitVoteServerRpc(ulong votedForClientId, ServerRpcParams rpcParams = def
 ### ClientRpcs (Host → Todos)
 
 ```csharp
-// MeetingManager.cs
-[ClientRpc]
-void OnMeetingStartedClientRpc(ulong reporterId, MeetingType type);
-
-// VotingSystem.cs
-[ClientRpc]
-void OnVoteResultClientRpc(ulong bannedClientId, bool wasVampire);
-
-// MatchManager.cs
-[ClientRpc]
-void OnMatchEndedClientRpc(WinCondition result);
-
-// RoleManager.cs — enviado apenas para o owner (TargetClientRpc)
-[ClientRpc]
-void ReceiveRoleAssignmentClientRpc(PlayerRole role, ClientRpcParams clientRpcParams);
+[ClientRpc] void OnMeetingStartedClientRpc(ulong reporterId, MeetingType type);
+[ClientRpc] void OnVoteResultClientRpc(ulong bannedClientId, bool wasVampire);
+[ClientRpc] void OnMatchEndedClientRpc(WinCondition result);
+[ClientRpc] void ReceiveRoleAssignmentClientRpc(PlayerRole role, ClientRpcParams clientRpcParams);
 ```
 
 ---
 
 ## Validações de Segurança no Host
 
-Toda `[ServerRpc]` que envolve ação de gameplay deve validar:
-
 ```csharp
 [ServerRpc(RequireOwnership = true)]
 void RequestKillTargetServerRpc(ulong targetClientId, ServerRpcParams rpcParams = default)
 {
     ulong senderId = rpcParams.Receive.SenderClientId;
-    
-    // 1. O sender tem papel de Vampiro?
+
     if (GetPlayerRole(senderId) != PlayerRole.Vampire) return;
-    
-    // 2. O cooldown passou?
     if (!vampireCooldownTracker.CanAttack(senderId)) return;
-    
-    // 3. O alvo está vivo?
+
     var target = GetPlayerById(targetClientId);
     if (!target.IsAlive.Value) return;
-    
-    // 4. O alvo está próximo o suficiente?
+
     float distance = Vector2.Distance(
         GetPlayerPosition(senderId),
         GetPlayerPosition(targetClientId)
     );
     if (distance > KILL_RANGE) return;
-    
-    // 5. Tudo válido — executa
+
     target.IsAlive.Value = false;
     vampireCooldownTracker.ResetCooldown(senderId);
     OnPlayerKilledClientRpc(targetClientId);
 }
 ```
 
-**Regra:** Nunca confiar em dados vindos do client além dos parâmetros da RPC. O sender ID real vem de `rpcParams.Receive.SenderClientId`, não de um parâmetro passado pelo client.
+**Regra:** O sender ID real vem de `rpcParams.Receive.SenderClientId` — nunca de parâmetro passado pelo client.
 
 ---
 
 ## Sincronização de Iluminação
 
-A iluminação é o sistema mais sensível a erros de arquitetura de rede.
-
-### O que NÃO fazer:
 ```csharp
 // ❌ ERRADO — networkando renderização
 [ClientRpc]
-void UpdateLightIntensityClientRpc(float intensity, Color color, float radius) { ... }
-```
+void UpdateLightIntensityClientRpc(float intensity, Color color, float radius) { }
 
-### O que fazer:
-```csharp
 // ✅ CORRETO — apenas estado booleano
 public NetworkVariable<bool> IsLit = new NetworkVariable<bool>(true);
 
-// Cada client reage à mudança e renderiza localmente
 void OnIsLitChanged(bool previous, bool current)
 {
-    torchLight.enabled = current;                    // renderização local
-    torchAnimator.SetBool("isLit", current);         // animação local
-    torchParticles.gameObject.SetActive(current);    // partículas locais
-}
-```
-
----
-
-## Papel do Guarda — Visibilidade
-
-O papel do Guarda tem uma regra especial de visibilidade: **outros jogadores veem a skin de Guarda** (não aleatória), mas **não sabem que é o Guarda** até que a skin seja revelada numa área iluminada.
-
-```csharp
-// No CharacterVisuals.cs
-void UpdateCharacterVisuals()
-{
-    bool isInLight = PlayerVisibilityController.IsInLight(this.transform.position);
-    
-    if (!isInLight)
-    {
-        // Escuridão: apenas olhos visíveis para outros jogadores
-        ShowOnlyEyes();
-        return;
-    }
-    
-    // Luz: mostra visual completo
-    if (assignedRole.Value == PlayerRole.Guard)
-        ApplyGuardSkin();   // skin exclusiva do Guarda
-    else
-        ApplyColoredSkin(bodyColor.Value, headVariant.Value, ...);
+    torchLight.enabled = current;
+    torchAnimator.SetBool("isLit", current);
+    torchParticles.gameObject.SetActive(current);
 }
 ```
 
@@ -301,27 +230,71 @@ void UpdateCharacterVisuals()
 
 ## Auto-Connect no Multiplayer Play Mode
 
-Para evitar clicar "Start Client" manualmente em cada virtual player durante testes:
+> ⚠️ **Atenção:** O código abaixo é a implementação **real e funcional** do projeto.  
+> A API `CurrentPlayer.ReadOnlyTags()` foi descontinuada no MPPM 2.x e **não funciona**.
+
+### Solução adotada — argumentos de linha de comando
+
+O MPPM injeta `-mppmTag <valor>` nos argumentos de cada Virtual Player. Isso funciona em todas as versões (1.x e 2.x) e não depende de nenhum namespace externo.
 
 ```csharp
-// Bootstrap.cs
-void Start()
+// Bootstrap.cs — AutoConnectInEditor()
+private void AutoConnectInEditor()
 {
 #if UNITY_EDITOR
-    using Unity.Multiplayer.Playmode;
-    var tags = CurrentPlayer.ReadOnlyTags();
-    
-    bool isVirtualPlayer = tags.Contains("innocent") || 
-                           tags.Contains("vampire") || 
-                           tags.Contains("guard");
-    
-    if (isVirtualPlayer)
-        StartAsClient();
+    // Sobrescreve o Relay para IP direto no editor
+    // (Relay só é usado em produção, via fluxo de Lobby)
+    Unity.Netcode.Transports.UTP.UnityTransport transport =
+        NetworkManager.Singleton.GetComponent<Unity.Netcode.Transports.UTP.UnityTransport>();
+    transport.SetConnectionData("127.0.0.1", 7777);
+
+    if (IsVirtualPlayer())
+    {
+        Debug.Log("[Bootstrap] Virtual Player → StartClient (IP direto)");
+        NetworkManager.Singleton.StartClient();
+    }
     else
-        StartAsHost();
+    {
+        Debug.Log("[Bootstrap] Main Editor → StartHost (IP direto)");
+        NetworkManager.Singleton.StartHost();
+    }
 #endif
 }
+
+private static bool IsVirtualPlayer()
+{
+    string[] args = System.Environment.GetCommandLineArgs();
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] == "-mppmTag" && i + 1 < args.Length)
+        {
+            string tag = args[i + 1].ToLower();
+            return tag == "vampire" || tag == "innocent" || tag == "guard";
+        }
+    }
+    return false; // sem tag = Main Editor = Host
+}
 ```
+
+### Configuração das tags no Multiplayer Play Mode
+
+Em `Project Settings → Multiplayer → Playmode → Player Tags`:
+
+| Instância | Tag configurada | Resultado |
+|---|---|---|
+| Main Editor | (nenhuma) | `IsVirtualPlayer() = false` → StartHost |
+| Player 2 | `vampire` | `IsVirtualPlayer() = true` → StartClient |
+| Player 3 | `innocent` | `IsVirtualPlayer() = true` → StartClient |
+| Player 4 | `guard` | `IsVirtualPlayer() = true` → StartClient |
+
+### Por que IP direto no editor e não Relay?
+
+O Relay exige uma **alocação real** no Unity Cloud antes de `StartHost/Client`. No editor com MPPM, não há fluxo de Lobby para fazer essa alocação. A solução correta é:
+
+- **Editor (MPPM):** IP direto `127.0.0.1:7777` — sem custo, sem internet, imediato
+- **Produção:** Relay real — fluxo completo de Lobby → Relay allocation → `SetRelayServerData()` → Start
+
+O prefab do `NetworkManager` permanece configurado como `Relay Unity Transport`. O `Bootstrap.cs` sobrescreve o protocolo apenas no editor via `SetConnectionData()`.
 
 ---
 

@@ -15,8 +15,10 @@
 | Unity Transport | **2.6.0** | Package Manager |
 | Multiplayer Tools | **2.2.8** | Package Manager |
 | Multiplayer Services SDK | mais recente | Package Manager |
-| Multiplayer Play Mode | mais recente | Package Manager |
-| A* Pathfinder Pro | — | Asset Store (importado em `Plugins/`) |
+| Multiplayer Play Mode | **2.0.2** | Package Manager |
+| A* Pathfinder Pro | — | Asset Store (`Plugins/AstarPathfinder/`) |
+
+> **Pacotes removidos intencionalmente:** Vivox foi removido do projeto — não utilizamos chat de voz e o pacote gerava erros de inicialização por falta de configuração no Unity Dashboard.
 
 ---
 
@@ -44,7 +46,9 @@
 ### Unity Transport
 **O que faz:** Camada de transporte UDP de baixo nível que o NGO usa internamente.
 
-**Nossa interação:** Indireta. O NGO abstrai o Transport. Configuramos apenas o tipo de transporte no `NetworkManager` (UnityTransport para conexões reais).
+**Nossa interação:** Indireta. O NGO abstrai o Transport. Configuramos o tipo de transporte no `NetworkManager`:
+- Prefab: `Relay Unity Transport` (produção)
+- Editor (MPPM): sobrescrito em runtime para IP direto via `SetConnectionData()`
 
 ---
 
@@ -55,20 +59,31 @@
 - **Session** — estado persistente da sessão de jogo
 
 **Por que Relay:**  
-No modelo Client Hosted, o Host precisa aceitar conexões. Sem Relay, o Host precisaria abrir porta no roteador (NAT traversal). O Relay da Unity age como intermediário — clients conectam ao Relay, que encaminha para o Host. Solução limpa e sem configuração do usuário final.
+No modelo Client Hosted, o Host precisa aceitar conexões. Sem Relay, o Host precisaria abrir porta no roteador (NAT traversal). O Relay age como intermediário — clients conectam ao Relay, que encaminha para o Host.
 
 ---
 
-### Multiplayer Play Mode
-**O que faz:** Permite rodar múltiplas instâncias do jogo no Editor sem fazer build. Essencial para testar com 2–4 jogadores na mesma máquina.
+### Multiplayer Play Mode 2.0.2
+
+**O que faz:** Permite rodar múltiplas instâncias do jogo no Editor sem build. Essencial para testar com 2–4 jogadores na mesma máquina.
+
+**Mudança importante na versão 2.0:** A maior parte do código foi migrada para dentro do engine Unity 6.3 (`Play Mode Framework`). Por isso, o namespace `Unity.Multiplayer.Playmode` **não está acessível** via `using` convencional em scripts de usuário. A classe `CurrentPlayer` existe, mas não pode ser referenciada sem Assembly Definition específico.
+
+**Solução adotada no projeto:** Auto-connect via argumentos de linha de comando (ver `05-bootstrap-e-cenas.md`).
 
 **Como configuramos:**
-- Main Editor = sempre o Host
-- Virtual Players (Player 2, 3, 4) = Clients com auto-connect por tag
+
+| Instância | Tag MPPM | Comportamento no Bootstrap |
+|---|---|---|
+| Main Editor | (nenhuma) | `StartHost()` com IP direto |
+| Player 2 | `vampire` | `StartClient()` com IP direto |
+| Player 3 | `innocent` | `StartClient()` com IP direto |
+| Player 4 | `guard` | `StartClient()` com IP direto |
 
 ---
 
-### Multiplayer Tools
+### Multiplayer Tools 2.2.8
+
 **O que faz:** Ferramentas de debug e otimização de rede.
 
 | Ferramenta | Quando usar |
@@ -79,23 +94,25 @@ No modelo Client Hosted, o Host precisa aceitar conexões. Sem Relay, o Host pre
 | Network Profiler | Identificar gargalos de bandwidth por mensagem |
 | Hierarchy Network Debug View | Ver ownership de cada NetworkObject na Hierarchy |
 
+> **Nota:** O `[Debug Updater]` que aparece na Hierarchy em runtime é gerado automaticamente por este pacote. É normal e esperado.
+
 ---
 
 ### A* Pathfinder Pro
 **O que faz:** Pathfinding e navegação para NPCs usando o algoritmo A*.
 
 **Por que não NavMesh do Unity:**  
-NavMesh do Unity é 3D-first. A* Pathfinder Pro tem suporte nativo a 2D top-down com grid graphs e point graphs, que se encaixam melhor no layout da vila.
+NavMesh é 3D-first. A* Pathfinder Pro tem suporte nativo a 2D top-down com grid graphs e point graphs.
 
 **Onde fica:** `Assets/Plugins/AstarPathfinder/` — nunca modificar.
 
-**Regra de rede:** Todo pathfinding roda exclusivamente no Host. Clients recebem apenas a posição final do NPC via `NetworkVariable<Vector2>`. O pathfinding nunca é executado em clients.
+**Regra de rede:** Todo pathfinding roda exclusivamente no Host. Clients recebem apenas a posição do NPC via `NetworkVariable<Vector2>`.
 
 ---
 
 ## Modelo de Hosting
 
-### Client Hosted (protótipo e jogo final)
+### Client Hosted
 
 ```
 Jogador A (Host)
@@ -113,29 +130,34 @@ Jogadores B, C, D... (Clients)
   └── Enviam ações via ServerRpc
 ```
 
-**Vantagens para este projeto:**
-- Sem custo de servidor dedicado
-- Relay gratuito para volume baixo
-- Suficiente para sessões de 5–15 jogadores com ritmo lento
-
 **Risco conhecido:**  
 Se o Host sair durante a partida, a sessão termina. Mitigação futura: host migration.
 
 ---
 
-## Fluxo de Conexão
+## Fluxo de Conexão (Produção)
 
 ```
-1. Host cria Relay allocation
-2. Relay retorna Join Code (ex: "ABCD12")
-3. Host cria Lobby com o Join Code nos dados
-4. Host inicia NetworkManager.StartHost()
+HOST
+1. Relay allocation → obtém JoinCode (ex: "ABCD12")
+2. Cria Lobby com JoinCode nos dados da sala
+3. transport.SetRelayServerData(allocation, "dtls")
+4. NetworkManager.StartHost()
 
-5. Client busca Lobby pelo código
-6. Client lê o Join Code dos dados do Lobby
-7. Client configura UnityTransport com dados do Relay
-8. Client inicia NetworkManager.StartClient()
-9. Conexão estabelecida via Relay
+CLIENT
+5. Entra no Lobby pelo código de 6 letras
+6. Lê JoinCode do Relay dos dados do Lobby
+7. transport.SetRelayServerData(joinAllocation, "dtls")
+8. NetworkManager.StartClient()
+```
+
+## Fluxo de Conexão (Editor / MPPM)
+
+```
+TODOS (sem fluxo de Lobby)
+1. Bootstrap detecta tag via -mppmTag nos args
+2. transport.SetConnectionData("127.0.0.1", 7777)
+3. Main Editor → StartHost() | Virtual Players → StartClient()
 ```
 
 ---
@@ -144,39 +166,19 @@ Se o Host sair durante a partida, a sessão termina. Mitigação futura: host mi
 
 ### Por que Host Autoritativo e não Client-Side Prediction?
 
-Echoes in the Dark é um jogo de ritmo **lento** (social deduction). Latência de 100–300ms não impacta a experiência como impactaria em um FPS. Client-side prediction adiciona complexidade enorme (reconciliation, rollback) sem benefício perceptível para este tipo de jogo.
+Echoes in the Dark é um jogo de ritmo **lento** (social deduction). Latência de 100–300ms não impacta a experiência. Client-side prediction adiciona complexidade enorme sem benefício perceptível.
 
 **Regra:** Toda validação de gameplay acontece no Host. Clients apenas solicitam ações via `ServerRpc`.
 
 ---
 
-### NetworkVariable vs ServerRpc/ClientRpc
+### NetworkVariable vs RPC
 
 | Usar `NetworkVariable` quando... | Usar RPC quando... |
 |---|---|
-| Estado persistente que clients novos precisam saber | Evento pontual (morte, votação, animação) |
+| Estado persistente que clients novos precisam saber ao conectar | Evento pontual (morte, votação, animação) |
 | Valor muda com frequência baixa/média | Ação que acontece uma vez |
-| Dado que precisa de dirty tracking automático | Precisa enviar parâmetros complexos |
-
-**Exemplos no projeto:**
-
-```csharp
-// NetworkVariable — estado persistente
-NetworkVariable<bool> torchIsLit;           // tocha acesa/apagada
-NetworkVariable<PlayerRole> assignedRole;   // papel do jogador
-NetworkVariable<int> tasksCompleted;        // missões completadas
-NetworkVariable<Vector2> npcPosition;       // posição do NPC
-
-// ServerRpc — cliente solicita ação
-[ServerRpc] void RequestInteractTaskServerRpc(int taskId);
-[ServerRpc] void RequestKillTargetServerRpc(ulong targetId);
-[ServerRpc] void RequestBlowTorchServerRpc(ulong torchId);
-
-// ClientRpc — servidor notifica todos
-[ClientRpc] void OnPlayerKilledClientRpc(ulong victimId);
-[ClientRpc] void OnMeetingStartedClientRpc(ulong reporterId);
-[ClientRpc] void OnVoteResultClientRpc(ulong bannedPlayerId);
-```
+| Dado com dirty tracking automático | Precisa enviar parâmetros complexos |
 
 ---
 
@@ -184,14 +186,13 @@ NetworkVariable<Vector2> npcPosition;       // posição do NPC
 
 ```
 Bootstrap (nunca descarregada)
- └── NetworkManager (DontDestroyOnLoad)
- └── ServiceBootstrapper (DontDestroyOnLoad)
- └── GameEvents (DontDestroyOnLoad)
+ └── Bootstrap.cs (DontDestroyOnLoad)
+ └── NetworkManager + UnityTransport (DontDestroyOnLoad)
 
 MainMenu / Lobby / Match (carregadas/descarregadas normalmente)
 ```
 
-O `NetworkManager` nunca é destruído entre cenas. Isso garante que a conexão de rede persiste durante a transição de Lobby → Match.
+O `NetworkManager` nunca é destruído entre cenas — garante que a conexão persiste durante `Lobby → Match`.
 
 ---
 
