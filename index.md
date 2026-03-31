@@ -13,13 +13,18 @@
 | ✅ Multiplayer Center | Concluído | NGO + Multiplayer Services + Play Mode instalados |
 | ✅ GDD v2.0 | Concluído | Game Design Document finalizado |
 | ✅ Documentação de sistemas | Concluído | Personagem, Iluminação, Papéis, Missões, NPC |
-| ✅ Cenas e Bootstrap | Concluído | 4 cenas criadas, Bootstrap.cs funcional |
+| ✅ Cenas e Bootstrap | Concluído | 4 cenas criadas, Bootstrap.cs refatorado com fluxo Logo→Intro→Loading |
 | ✅ NetworkManager real | Concluído | Prefab configurado com Relay Unity Transport |
-| 🔄 MainMenu | Em andamento | Próxima sessão |
-| ⏳ Lobby (criação de sala) | Pendente | Após MainMenu |
-| ⏳ Lobby (entrada por código) | Pendente | — |
-| ⏳ Player base | Pendente | — |
-| ⏳ Match scene | Pendente | — |
+| ✅ SceneLoader | Concluído | Navegação centralizada entre cenas |
+| ✅ MainMenu | Concluído | UI funcional com 4 botões (Jogar, Configurações, Shopping, Sair) |
+| ✅ Lobby — Conexão Relay | Concluído | Host cria sala via Relay, Client conecta com código |
+| ✅ Autenticação Unity Services | Concluído | SignInAnonymously com perfil por PID (MPPM safe) |
+| ✅ Sistema de Settings | Concluído | 4 abas: Geral, Gráficos, Som, Controles |
+| ✅ AudioMixer | Concluído | 4 canais expostos: VolGeral, VolMusica, VolSFX, VolChat |
+| ✅ Sistema de Rebind | Concluído | Rebind de teclas com detecção de conflito e bloqueio de ESC |
+| 🔄 Lobby — Interface completa | Em andamento | Lista de players, loading, código mascarado, botão Pronto |
+| ⏳ Player base | Pendente | NetworkObject + movimento sincronizado |
+| ⏳ Match scene | Pendente | Gameplay completo |
 
 ---
 
@@ -33,10 +38,12 @@
 - [03 · Arquitetura Multiplayer](docs/03-arquitetura-multiplayer.md)
 
 ### Implementações Realizadas
-- [05 · Bootstrap e Cenas](docs/05-bootstrap-e-cenas.md) — O que foi implementado, decisões tomadas, problemas resolvidos
+- [05 · Bootstrap e Cenas](docs/05-bootstrap-e-cenas.md) — Fluxo Logo → Intro → Loading → MainMenu
+- [07 · MainMenu e Settings](docs/07-mainmenu-e-settings.md) — Tudo implementado na sessão atual
 
 ### Planejamento
-- [06 · MainMenu → Lobby](docs/06-planejamento-mainmenu-lobby.md) — Próximos passos detalhados com arquitetura e código planejado
+- [06 · Sessão B — Lobby Conexão](docs/06-planejamento-mainmenu-lobby.md) — Relay + Lobby implementados, problemas conhecidos
+- [08 · Sessão C — Lobby Completo](docs/08-planejamento-lobby-completo.md) — Próxima sessão: lista de players, loading, código mascarado, botão Pronto
 
 ### Sistemas do Jogo
 - [Sistema · Personagem](docs/sistemas/sistema-personagem.md)
@@ -57,9 +64,10 @@ Unity 6.3 LTS
 │
 ├── Netcode for GameObjects 2.11.0   → sincronização de estado
 ├── Unity Transport 2.6.0            → camada UDP
-├── Unity Multiplayer Services       → Lobby + Relay + Session
+├── Unity Multiplayer Services       → Lobby + Relay + Authentication
 ├── Multiplayer Play Mode 2.0.2      → teste local com até 4 instâncias
 ├── Multiplayer Tools 2.2.8          → debug de rede
+├── New Input System                 → controles + rebind
 └── A* Pathfinder Pro                → IA dos NPCs (Host only)
 ```
 
@@ -67,16 +75,19 @@ Unity 6.3 LTS
 
 ```
 Bootstrap.unity (índice 0 — nunca descarregada)
-  └── DontDestroyOnLoad: Bootstrap + NetworkManager
+  └── DontDestroyOnLoad: Bootstrap + NetworkManager + SceneLoader
+                       + SettingsManager + InputManager
        │
-       ▼
+       ▼  [Logo do estúdio → Intro (vídeo) → Loading (serviços)]
+       │
 MainMenu.unity (índice 1)
-  └── Botões: Jogar, Configurações, Sair
+  └── Botões: Jogar, Configurações, Shopping, Sair
+  └── SettingsPanel: Geral | Gráficos | Som | Controles
        │
        ▼
 Lobby.unity (índice 2)
-  ├── Host: Criar Sala → Relay allocation → código de 6 dígitos
-  └── Client: Entrar com código → conectar via Relay
+  ├── Host: Criar Sala → Relay allocation → código mascarado → lista de players
+  └── Client: Entrar com código → painel compartilhado → botão Pronto
        │
        ▼
 Match.unity (índice 3)
@@ -90,6 +101,17 @@ Host (um dos jogadores)
  ├── Autoridade sobre: papéis, missões, mortes, votação
  ├── Roda toda a IA dos NPCs
  └── Clients conectam via Relay (sem IP exposto)
+```
+
+### DontDestroyOnLoad — Singletons permanentes
+
+```
+DontDestroyOnLoad
+ ├── Bootstrap          → inicialização, fluxo de intro
+ ├── NetworkManager     → conexão NGO
+ ├── SceneLoader        → navegação entre cenas
+ ├── SettingsManager    → persistência de configurações (PlayerPrefs)
+ └── InputManager       → InputActionAsset + overrides de bindings
 ```
 
 ---
@@ -106,8 +128,12 @@ Host (um dos jogadores)
 | Colisão | Só com cenário |
 | Sorteio de papéis | Host sorteia, envia via TargetClientRpc |
 | Personagem | Marshmallow 4 partes, 13 cores, acessórios |
-| Auto-connect editor | `-mppmTag` via args de linha de comando |
-| Transport no editor | IP direto (127.0.0.1:7777) — Relay só em produção |
+| Auto-connect editor | Removido — Lobby gerencia toda conexão |
+| Transport produção | Relay Unity Transport via `SetRelayServerData()` |
+| Autenticação | `SignInAnonymouslyAsync()` com perfil por PID do processo |
+| Persistência de settings | `PlayerPrefs` via `SettingsManager` |
+| Rebind de teclas | `InputActionRebindingExtensions` + `PlayerPrefs` JSON |
+| Localização | `LocalizationManager` com JSONs (scaffold — implementação futura) |
 
 ---
 

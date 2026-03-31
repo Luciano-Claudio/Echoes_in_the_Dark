@@ -16,97 +16,133 @@
 | Multiplayer Tools | **2.2.8** | Package Manager |
 | Multiplayer Services SDK | mais recente | Package Manager |
 | Multiplayer Play Mode | **2.0.2** | Package Manager |
+| New Input System | mais recente | Package Manager |
 | A* Pathfinder Pro | — | Asset Store (`Plugins/AstarPathfinder/`) |
 
-> **Pacotes removidos intencionalmente:** Vivox foi removido do projeto — não utilizamos chat de voz e o pacote gerava erros de inicialização por falta de configuração no Unity Dashboard.
+> **Pacotes removidos intencionalmente:** Vivox foi removido — não utilizamos chat de voz e o pacote gerava erros de inicialização sem configuração no Unity Dashboard.
 
 ---
 
-## Pacotes do Unity
+## Netcode for GameObjects (NGO)
 
-### Netcode for GameObjects (NGO)
 **O que faz:** Camada de alto nível de networking. Gerencia sincronização de `NetworkObject`, `NetworkVariable`, RPCs e spawn/despawn pela rede.
 
-**Por que NGO e não outras soluções:**
+**Por que NGO:**
 - Integração nativa com Unity 6.3
-- Suporte oficial da Unity
 - `NetworkVariable` com dirty tracking eficiente
-- Suficiente para jogo de ritmo lento (social deduction não precisa de rollback/reconciliation)
+- Suficiente para jogo de ritmo lento (social deduction não precisa de rollback)
 
-**O que usamos dele:**
+**O que usamos:**
 - `NetworkManager` — gerencia conexões e ciclo de vida
 - `NetworkObject` — componente em todo prefab sincronizado
 - `NetworkVariable<T>` — estados sincronizados com dirty tracking
-- `[ServerRpc]` — cliente envia pedido para o servidor
-- `[ClientRpc]` — servidor envia dado para todos os clientes
+- `[ServerRpc]` — client envia pedido para o servidor
+- `[ClientRpc]` — servidor envia dado para clientes
 - `NetworkBehaviour` — base de todos os scripts de rede
 
 ---
 
-### Unity Transport
-**O que faz:** Camada de transporte UDP de baixo nível que o NGO usa internamente.
+## Unity Transport 2.6.0
 
-**Nossa interação:** Indireta. O NGO abstrai o Transport. Configuramos o tipo de transporte no `NetworkManager`:
-- Prefab: `Relay Unity Transport` (produção)
-- Editor (MPPM): sobrescrito em runtime para IP direto via `SetConnectionData()`
+**Interação:** Indireta — o NGO abstrai o Transport. Configurado no `NetworkManager`:
+- Prefab: `Relay Unity Transport` (modo produção)
+- Editor: dados de Relay configurados pelo `LobbyController` antes de `StartHost/Client`
 
----
-
-### Multiplayer Services SDK
-**O que faz:** Abstrai três serviços da Unity Cloud em uma única API:
-- **Lobby** — criar/entrar em salas, ver lista de jogadores
-- **Relay** — conexão peer-to-peer sem expor IP, sem servidor dedicado
-- **Session** — estado persistente da sessão de jogo
-
-**Por que Relay:**  
-No modelo Client Hosted, o Host precisa aceitar conexões. Sem Relay, o Host precisaria abrir porta no roteador (NAT traversal). O Relay age como intermediário — clients conectam ao Relay, que encaminha para o Host.
+**Mudança importante no 2.x:** O construtor de conveniência `RelayServerData(Allocation, "dtls")` foi **removido**. É necessário passar todos os campos manualmente (ver `RelayNetworkService.cs`).
 
 ---
 
-### Multiplayer Play Mode 2.0.2
+## Unity Multiplayer Services SDK
 
-**O que faz:** Permite rodar múltiplas instâncias do jogo no Editor sem build. Essencial para testar com 2–4 jogadores na mesma máquina.
+Três serviços integrados:
 
-**Mudança importante na versão 2.0:** A maior parte do código foi migrada para dentro do engine Unity 6.3 (`Play Mode Framework`). Por isso, o namespace `Unity.Multiplayer.Playmode` **não está acessível** via `using` convencional em scripts de usuário. A classe `CurrentPlayer` existe, mas não pode ser referenciada sem Assembly Definition específico.
+**Lobby:** Criar/entrar em salas, ver lista de jogadores, dados por player, heartbeat.  
+**Relay:** Conexão peer-to-peer sem expor IP. Relay age como intermediário entre Host e Clients.  
+**Authentication:** Login anônimo via `SignInAnonymouslyAsync()`. Necessário para usar Relay e Lobby.
 
-**Solução adotada no projeto:** Auto-connect via argumentos de linha de comando (ver `05-bootstrap-e-cenas.md`).
+### Autenticação — decisão de perfil por PID
 
-**Como configuramos:**
+Sem perfis separados, todas as instâncias MPPM compartilham a mesma sessão de autenticação. Isso corrompre o `JoinAllocationAsync` no Relay (retorna "Not Found" mesmo com código válido).
 
-| Instância | Tag MPPM | Comportamento no Bootstrap |
+**Solução:**
+```csharp
+var options = new InitializationOptions();
+#if UNITY_EDITOR
+options.SetProfile($"Player_{System.Diagnostics.Process.GetCurrentProcess().Id}");
+#endif
+await UnityServices.InitializeAsync(options);
+```
+
+Cada processo MPPM tem PID único → sessão de autenticação isolada → Relay funciona independentemente em cada instância.
+
+### Custos (camada gratuita)
+
+| Serviço | Limite gratuito | Status do projeto |
 |---|---|---|
-| Main Editor | (nenhuma) | `StartHost()` com IP direto |
-| Player 2 | `vampire` | `StartClient()` com IP direto |
-| Player 3 | `innocent` | `StartClient()` com IP direto |
-| Player 4 | `guard` | `StartClient()` com IP direto |
+| Relay | 50 CCU + 50 GB/mês | Bem dentro do limite |
+| Lobby | 200 lobbies + 2.000 membros/mês | Bem dentro do limite |
+| Authentication | Ilimitado (anônimo) | — |
 
 ---
 
-### Multiplayer Tools 2.2.8
+## Multiplayer Play Mode 2.0.2
 
-**O que faz:** Ferramentas de debug e otimização de rede.
+**O que faz:** Múltiplas instâncias do jogo no Editor sem build.
 
-| Ferramenta | Quando usar |
+**Mudança no 2.0:** `Unity.Multiplayer.Playmode` não está acessível via `using` convencional. A API `CurrentPlayer.ReadOnlyTags()` foi descontinuada.
+
+**Configuração atual:**
+
+| Instância | Comportamento |
 |---|---|
-| Network Scene Visualization | Ver quais objetos são NetworkObjects na cena |
-| Runtime Net Stats Monitor | Monitorar bandwidth, mensagens/s em tempo real |
-| Network Simulator | Simular latência e packet loss para testar robustez |
-| Network Profiler | Identificar gargalos de bandwidth por mensagem |
-| Hierarchy Network Debug View | Ver ownership de cada NetworkObject na Hierarchy |
+| Main Editor | Bootstrap → MainMenu → Lobby → Criar Sala (Host via Relay) |
+| Virtual Player 2/3/4 | Bootstrap → MainMenu → Lobby → Entrar com código (Client via Relay) |
 
-> **Nota:** O `[Debug Updater]` que aparece na Hierarchy em runtime é gerado automaticamente por este pacote. É normal e esperado.
+> O auto-connect via `-mppmTag` foi **removido** quando o Lobby passou a gerenciar toda a conexão.
 
 ---
 
-### A* Pathfinder Pro
-**O que faz:** Pathfinding e navegação para NPCs usando o algoritmo A*.
+## New Input System
 
-**Por que não NavMesh do Unity:**  
-NavMesh é 3D-first. A* Pathfinder Pro tem suporte nativo a 2D top-down com grid graphs e point graphs.
+**O que faz:** Sistema moderno de input da Unity, baseado em `InputActionAsset` e bindings.
 
-**Onde fica:** `Assets/Plugins/AstarPathfinder/` — nunca modificar.
+**Por que não o Input System antigo (`Input.GetKey`):**
+- Rebind de teclas sem código adicional via `PerformInteractiveRebinding()`
+- Serialização de overrides como JSON
+- Separação clara entre input e lógica de jogo
 
-**Regra de rede:** Todo pathfinding roda exclusivamente no Host. Clients recebem apenas a posição do NPC via `NetworkVariable<Vector2>`.
+**Asset criado:** `Assets/_EchoesInTheDark/Input/EchoesInputActions.inputactions`
+
+**Persistência de rebinds:** `PlayerPrefs["InputBindingOverrides"]` — JSON serializado do asset completo. Carregado no `InputManager.Awake()` e salvo via `InputManager.SalvarOverrides()`.
+
+**Teclas protegidas:**
+- `ESC` — nunca pode ser atribuída; ao pressionar durante rebind, cancela e fecha o painel
+
+---
+
+## A* Pathfinder Pro
+
+**O que faz:** Pathfinding para NPCs usando algoritmo A*.  
+**Por que não NavMesh:** NavMesh é 3D-first; A* tem suporte nativo a 2D top-down.  
+**Onde fica:** `Assets/Plugins/AstarPathfinder/` — nunca modificar.  
+**Regra de rede:** Todo pathfinding roda exclusivamente no Host. Clients recebem posição via `NetworkVariable<Vector2>`.
+
+---
+
+## AudioMixer — GameAudioMixer
+
+**Localização:** `Assets/_EchoesInTheDark/Audio/GameAudioMixer`
+
+```
+Master (VolGeral — parâmetro exposto)
+├── Musica (VolMusica — parâmetro exposto)
+├── SFX    (VolSFX   — parâmetro exposto)
+└── Chat   (VolChat  — parâmetro exposto)
+```
+
+O `SettingsManager` controla o volume via `AudioMixer.SetFloat(nome, valorEmDécibeis)`.
+
+Conversão: `linear > 0.001 ? Log10(linear) * 20 : -80` — valor 0 → -80 dB (silêncio), valor 1 → 0 dB (máximo).
 
 ---
 
@@ -125,13 +161,12 @@ Relay (Unity Cloud)
   └── Intermediário sem estado — apenas encaminha pacotes
 
 Jogadores B, C, D... (Clients)
-  ├── Conectam ao Relay com o Join Code gerado pelo Host
+  ├── Conectam ao Relay com o Join Code do Lobby
   ├── Recebem estado via NetworkVariable
   └── Enviam ações via ServerRpc
 ```
 
-**Risco conhecido:**  
-Se o Host sair durante a partida, a sessão termina. Mitigação futura: host migration.
+**Risco conhecido:** Se o Host sair, a sessão termina. Mitigação futura: host migration.
 
 ---
 
@@ -139,25 +174,20 @@ Se o Host sair durante a partida, a sessão termina. Mitigação futura: host mi
 
 ```
 HOST
-1. Relay allocation → obtém JoinCode (ex: "ABCD12")
-2. Cria Lobby com JoinCode nos dados da sala
-3. transport.SetRelayServerData(allocation, "dtls")
-4. NetworkManager.StartHost()
+1. SignInAnonymouslyAsync()
+2. RelayService.CreateAllocationAsync(15)       → allocation
+3. RelayService.GetJoinCodeAsync(allocationId)  → joinCode (6 chars)
+4. transport.SetRelayServerData(allocation)
+5. LobbyService.CreateLobbyAsync(name, 16, { RelayJoinCode: joinCode })
+6. NetworkManager.StartHost()
 
 CLIENT
-5. Entra no Lobby pelo código de 6 letras
-6. Lê JoinCode do Relay dos dados do Lobby
-7. transport.SetRelayServerData(joinAllocation, "dtls")
-8. NetworkManager.StartClient()
-```
-
-## Fluxo de Conexão (Editor / MPPM)
-
-```
-TODOS (sem fluxo de Lobby)
-1. Bootstrap detecta tag via -mppmTag nos args
-2. transport.SetConnectionData("127.0.0.1", 7777)
-3. Main Editor → StartHost() | Virtual Players → StartClient()
+7. SignInAnonymouslyAsync()
+8. LobbyService.JoinLobbyByCodeAsync(lobbyCode) → lobby
+9. relayCode = lobby.Data["RelayJoinCode"].Value
+10. RelayService.JoinAllocationAsync(relayCode)  → joinAllocation
+11. transport.SetRelayServerData(joinAllocation)
+12. NetworkManager.StartClient()
 ```
 
 ---
@@ -166,7 +196,7 @@ TODOS (sem fluxo de Lobby)
 
 ### Por que Host Autoritativo e não Client-Side Prediction?
 
-Echoes in the Dark é um jogo de ritmo **lento** (social deduction). Latência de 100–300ms não impacta a experiência. Client-side prediction adiciona complexidade enorme sem benefício perceptível.
+Echoes in the Dark é um jogo de ritmo **lento**. Latência de 100–300ms não impacta. Client-side prediction adiciona complexidade enorme sem benefício.
 
 **Regra:** Toda validação de gameplay acontece no Host. Clients apenas solicitam ações via `ServerRpc`.
 
@@ -176,9 +206,9 @@ Echoes in the Dark é um jogo de ritmo **lento** (social deduction). Latência d
 
 | Usar `NetworkVariable` quando... | Usar RPC quando... |
 |---|---|
-| Estado persistente que clients novos precisam saber ao conectar | Evento pontual (morte, votação, animação) |
+| Estado persistente que clients novos precisam ao conectar | Evento pontual (morte, votação, animação) |
 | Valor muda com frequência baixa/média | Ação que acontece uma vez |
-| Dado com dirty tracking automático | Precisa enviar parâmetros complexos |
+| Dirty tracking automático | Precisa enviar parâmetros complexos |
 
 ---
 
@@ -186,20 +216,21 @@ Echoes in the Dark é um jogo de ritmo **lento** (social deduction). Latência d
 
 ```
 Bootstrap (nunca descarregada)
- └── Bootstrap.cs (DontDestroyOnLoad)
- └── NetworkManager + UnityTransport (DontDestroyOnLoad)
+ ├── Bootstrap.cs
+ ├── NetworkManager + UnityTransport
+ ├── SceneLoader
+ ├── SettingsManager
+ └── InputManager
 
 MainMenu / Lobby / Match (carregadas/descarregadas normalmente)
 ```
-
-O `NetworkManager` nunca é destruído entre cenas — garante que a conexão persiste durante `Lobby → Match`.
 
 ---
 
 ## Plataforma Alvo
 
 - **PC — Windows 10/11 (64-bit)**
-- Controles: teclado + mouse
+- Controles: teclado + mouse (rebindável)
 - Gamepad: não prioritário no protótipo
 
 ---

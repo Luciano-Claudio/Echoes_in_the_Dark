@@ -1,111 +1,220 @@
 using System;
 using System.Threading.Tasks;
-using Unity.Netcode;
+using TMPro;
+using Unity.Services.Authentication;
 using Unity.Services.Core;
 using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Utilities;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
+using UnityEngine.Video;
 
 namespace EchoesInTheDark.Core
 {
     /// <summary>
-    /// Entry point do jogo. Persiste entre todas as cenas via DontDestroyOnLoad.
-    /// Compatível com Multiplayer Play Mode 2.x (Unity 6.3).
+    /// Entry point do jogo. Fluxo:
+    /// PanelLogo → PanelIntro (vídeo) → PanelLoading → MainMenu
     /// </summary>
     public class Bootstrap : MonoBehaviour
     {
-        // ── Constantes ───────────────────────────────────────────────────────
         private const string SCENE_MAIN_MENU = "MainMenu";
 
-        private const string TAG_VAMPIRE = "vampire";
-        private const string TAG_INNOCENT = "innocent";
-        private const string TAG_GUARD = "guard";
+        [Header("Painéis de Intro")]
+        [SerializeField] private GameObject _panelLogo;
+        [SerializeField] private GameObject _panelIntro;
+        [SerializeField] private GameObject _panelLoading;
 
-        // ── Ciclo de vida ────────────────────────────────────────────────────
+        [Header("Logo")]
+        [Tooltip("Duração em segundos da tela de logo do estúdio")]
+        [SerializeField] private float _logoDuration = 3f;
+
+        [Header("Intro — Vídeo")]
+        [Tooltip("Componente VideoPlayer que reproduz a animação de intro")]
+        [SerializeField] private VideoPlayer _videoPlayer;
+
+        [Header("Loading UI")]
+        [SerializeField] private Slider _progressBar;
+        [SerializeField] private TextMeshProUGUI _textStatus;
+        [SerializeField] private TextMeshProUGUI _textErro;
+
+        private bool _skipRequested;
+        private bool _servicesReady;
+        private bool _servicesFailed;
+        private string _failMessage = string.Empty;
 
         private async void Awake()
         {
             DontDestroyOnLoad(gameObject);
 
-            try
-            {
-                await InitializeServicesAsync();
-                AutoConnectInEditor();
-                LoadMainMenu();
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Bootstrap] Falha na inicialização: {e.Message}\n{e.StackTrace}");
-            }
-        }
+            // Serviços inicializam em paralelo enquanto as telas de intro rodam
+            _ = InitializeServicesAsync();
 
-        // ── Unity Services ───────────────────────────────────────────────────
+            await ShowLogoAsync();
+            await ShowIntroAsync();
+            await ShowLoadingAsync();
 
-        private async Task InitializeServicesAsync()
-        {
-            if (UnityServices.State == ServicesInitializationState.Initialized)
+            if (_servicesFailed)
             {
-                Debug.Log("[Bootstrap] Unity Services já inicializados.");
+                _textErro.text = $"Erro crítico: {_failMessage}\nVerifique sua conexão e reinicie o jogo.";
                 return;
             }
 
-            Debug.Log("[Bootstrap] Inicializando Unity Services...");
-            await UnityServices.InitializeAsync();
-            Debug.Log("[Bootstrap] Unity Services prontos.");
+            LoadMainMenu();
         }
 
-        // ── Auto-connect (MPPM 2.x) ──────────────────────────────────────────
+        // ── LOGO ──────────────────────────────────────────────────────────
 
-        private void AutoConnectInEditor()
+        private async Task ShowLogoAsync()
         {
-#if UNITY_EDITOR
-            // No editor (MPPM local), usa IP direto — sem Relay.
-            // Relay só entra em produção, via fluxo de Lobby/Relay allocation.
-            Unity.Netcode.Transports.UTP.UnityTransport transport = NetworkManager.Singleton.GetComponent<Unity.Netcode.Transports.UTP.UnityTransport>();
+            _panelLogo.SetActive(true);
 
-            transport.SetConnectionData("127.0.0.1", 7777);
+            float elapsed = 0f;
+            while (elapsed < _logoDuration)
+            {
+                // Qualquer tecla do teclado ou botão de gamepad pula
+                if (Keyboard.current != null && Keyboard.current.anyKey.wasPressedThisFrame)
+                    break;
+                if (Gamepad.current != null && Gamepad.current.wasUpdatedThisFrame)
+                    break;
 
-            if (IsVirtualPlayer())
-            {
-                Debug.Log("[Bootstrap] Virtual Player → StartClient (IP direto)");
-                NetworkManager.Singleton.StartClient();
+                elapsed += Time.deltaTime;
+                await Task.Yield();
             }
-            else
-            {
-                Debug.Log("[Bootstrap] Main Editor → StartHost (IP direto)");
-                NetworkManager.Singleton.StartHost();
-            }
-#endif
+
+            _panelLogo.SetActive(false);
+
+            // Aguarda um frame de folga para garantir que o input da logo
+            // não vaze para a próxima fase
+            await Task.Yield();
+            await Task.Yield();
         }
 
-        /// <summary>
-        /// Detecta Virtual Players via argumentos de linha de comando.
-        /// O MPPM injeta -mppmTag &lt;valor&gt; em cada instância virtual.
-        /// Funciona no MPPM 1.x e 2.x sem depender de namespace externo.
-        /// </summary>
-        private static bool IsVirtualPlayer()
-        {
-            string[] args = Environment.GetCommandLineArgs();
+        // ── INTRO (VÍDEO) ─────────────────────────────────────────────────
 
-            for (int i = 0; i < args.Length; i++)
+        private async Task ShowIntroAsync()
+        {
+            if (_videoPlayer == null)
             {
-                // MPPM injeta -mppmTag <valor> nos Virtual Players
-                if (args[i] == "-mppmTag" && i + 1 < args.Length)
+                Debug.LogWarning("[Bootstrap] VideoPlayer não atribuído — pulando intro.");
+                return;
+            }
+
+            _panelIntro.SetActive(true);
+
+            // Prepara o vídeo
+            _videoPlayer.Prepare();
+            while (!_videoPlayer.isPrepared)
+                await Task.Yield();
+
+            // TaskCompletionSource que resolve quando o vídeo termina naturalmente
+            var videoFinished = new System.Threading.Tasks.TaskCompletionSource<bool>();
+            _videoPlayer.loopPointReached += _ => videoFinished.TrySetResult(true);
+
+            _videoPlayer.Play();
+
+            // Folga de 3 frames para estabilizar antes de aceitar input
+            await Task.Yield();
+            await Task.Yield();
+            await Task.Yield();
+
+            Debug.Log($"[Bootstrap] Vídeo iniciado. Aguardando término ou skip...");
+
+            // Loop: aguarda término do vídeo OU input de skip
+            bool skipped = false;
+            while (!videoFinished.Task.IsCompleted)
+            {
+                if (Keyboard.current != null && Keyboard.current.anyKey.wasPressedThisFrame)
                 {
-                    string tag = args[i + 1].ToLower();
-                    bool isKnownRole = tag == TAG_VAMPIRE
-                                   || tag == TAG_INNOCENT
-                                   || tag == TAG_GUARD;
-
-                    Debug.Log($"[Bootstrap] Tag MPPM detectada: '{tag}' | Role conhecida: {isKnownRole}");
-                    return isKnownRole;
+                    skipped = true;
+                    break;
                 }
+                if (Gamepad.current != null && Gamepad.current.wasUpdatedThisFrame)
+                {
+                    skipped = true;
+                    break;
+                }
+                await Task.Yield();
             }
 
-            // Sem -mppmTag → é o Main Editor
-            return false;
+            Debug.Log($"[Bootstrap] Intro encerrada. Skip: {skipped}");
+
+            _videoPlayer.loopPointReached -= _ => videoFinished.TrySetResult(true);
+            _videoPlayer.Stop();
+            _panelIntro.SetActive(false);
+
+            // Folga para não vazar input para a próxima fase
+            await Task.Yield();
+            await Task.Yield();
         }
 
-        // ── Navegação ────────────────────────────────────────────────────────
+        // ── LOADING ───────────────────────────────────────────────────────
+
+        private async Task ShowLoadingAsync()
+        {
+            _panelLoading.SetActive(true);
+            _progressBar.value = 0f;
+            _textErro.text = string.Empty;
+            _textStatus.text = "Verificando serviços...";
+
+            const float TIMEOUT = 15f;
+            float elapsed = 0f;
+
+            while (!_servicesReady && !_servicesFailed && elapsed < TIMEOUT)
+            {
+                elapsed += Time.deltaTime;
+                _progressBar.value = Mathf.Clamp01(elapsed / TIMEOUT) * 0.9f;
+                await Task.Yield();
+            }
+
+            if (_servicesFailed) return;
+
+            if (!_servicesReady)
+            {
+                _servicesFailed = true;
+                _failMessage = "Tempo limite de conexão esgotado.";
+                return;
+            }
+
+            _textStatus.text = "Pronto!";
+            _progressBar.value = 1f;
+            await Task.Delay(500);
+        }
+
+        // ── SERVICES ──────────────────────────────────────────────────────
+
+        private async Task InitializeServicesAsync()
+        {
+            try
+            {
+                var options = new InitializationOptions();
+
+#if UNITY_EDITOR
+                string profile = $"Player_{System.Diagnostics.Process.GetCurrentProcess().Id}";
+                options.SetProfile(profile);
+                Debug.Log($"[Bootstrap] Perfil: {profile}");
+#endif
+
+                await UnityServices.InitializeAsync(options);
+                Debug.Log("[Bootstrap] Unity Services prontos.");
+
+                if (!AuthenticationService.Instance.IsSignedIn)
+                {
+                    await AuthenticationService.Instance.SignInAnonymouslyAsync();
+                    Debug.Log($"[Bootstrap] Autenticado. PlayerID: {AuthenticationService.Instance.PlayerId}");
+                }
+
+                _servicesReady = true;
+            }
+            catch (Exception e)
+            {
+                _servicesFailed = true;
+                _failMessage = e.Message;
+                Debug.LogError($"[Bootstrap] Falha: {e.Message}");
+            }
+        }
+
+        // ── NAVEGAÇÃO ─────────────────────────────────────────────────────
 
         private void LoadMainMenu()
         {

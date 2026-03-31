@@ -36,6 +36,7 @@ Scripts/
 │   ├── Meeting/
 │   └── Match/
 ├── UI/
+│   ├── Components/
 │   ├── HUD/
 │   ├── Lobby/
 │   ├── Meeting/
@@ -47,17 +48,19 @@ Scripts/
 
 ### `Scripts/Core/`
 
-Sistemas que existem durante **toda a vida do jogo**. Não dependem de nenhum outro módulo.
+Sistemas que existem durante **toda a vida do jogo** via `DontDestroyOnLoad`. Não dependem de nenhum outro módulo.
 
 | Arquivo | Status | Responsabilidade |
 |---|---|---|
-| `Bootstrap.cs` | ✅ Implementado | Entry point — inicializa serviços, auto-connect, carrega MainMenu |
-| `SceneLoader.cs` | 🔄 Próxima sessão | Centraliza toda navegação entre cenas |
+| `Bootstrap.cs` | ✅ Implementado | Entry point — Logo → Intro → Loading → MainMenu |
+| `SceneLoader.cs` | ✅ Implementado | Centraliza toda navegação entre cenas |
+| `SettingsManager.cs` | ✅ Implementado | Persiste e aplica configurações via PlayerPrefs |
+| `InputManager.cs` | ✅ Implementado | Mantém InputActionAsset + overrides de bindings |
 | `GameEvents.cs` | ⏳ Futuro | Event bus global para comunicação desacoplada |
 | `SingletonNetwork.cs` | ⏳ Futuro | Classe base para singletons NetworkBehaviour |
 | `AppState.cs` | ⏳ Futuro | Estado global da aplicação |
 
-**✅ O que entra:** Scripts de inicialização, carregamento, eventos globais.  
+**✅ O que entra:** Scripts de inicialização, carregamento, eventos globais, singletons de sessão.  
 **🚫 O que evitar:** Lógica de roles, tasks, UI ou referências diretas ao NetworkManager.
 
 ---
@@ -82,12 +85,15 @@ Integração com Unity Services. **Abstrai os SDKs externos** — o resto do jog
 
 | Arquivo | Status | Responsabilidade |
 |---|---|---|
-| `RelayService.cs` | 🔄 Próxima sessão | Aloca servidor Relay, configura UnityTransport |
-| `LobbyNetworkService.cs` | 🔄 Próxima sessão | Cria/entra em salas, heartbeat |
+| `RelayNetworkService.cs` | ✅ Implementado | Aloca servidor Relay, configura UnityTransport |
+| `LobbyNetworkService.cs` | ✅ Implementado | Cria/entra em salas, heartbeat, refresh de players |
 | `SessionService.cs` | ⏳ Futuro | Estado persistente da sessão |
 
 > **Por que `LobbyNetworkService` e não `LobbyService`?**  
 > Evitar conflito de nome com `Unity.Services.Lobbies.LobbyService` (SDK da Unity).
+
+> **Por que `RelayNetworkService` e não `RelayService`?**  
+> Evitar conflito de nome com `Unity.Services.Relay.RelayService` (SDK da Unity).
 
 ---
 
@@ -95,13 +101,23 @@ Integração com Unity Services. **Abstrai os SDKs externos** — o resto do jog
 
 | Arquivo | Status | Responsabilidade |
 |---|---|---|
-| `MainMenuController.cs` | 🔄 Próxima sessão | Botões da tela inicial → delega para SceneLoader |
+| `MainMenuController.cs` | ✅ Implementado | Botões do MainMenu → delega para SceneLoader e SettingsController |
+| `SettingsController.cs` | ✅ Implementado | 4 abas de configurações — coordena SettingsManager |
 
 ### `Scripts/UI/Lobby/`
 
 | Arquivo | Status | Responsabilidade |
 |---|---|---|
-| `LobbyController.cs` | 🔄 Próxima sessão | Coordena UI do Lobby com RelayService e LobbyNetworkService |
+| `LobbyController.cs` | 🔄 Em andamento | Coordena UI do Lobby com RelayNetworkService e LobbyNetworkService |
+
+### `Scripts/UI/Components/`
+
+Componentes reutilizáveis de UI, independentes de contexto.
+
+| Arquivo | Status | Responsabilidade |
+|---|---|---|
+| `VolumeStepControl.cs` | ✅ Implementado | Controle de volume em 5 degraus visuais (< barras >) |
+| `RebindButton.cs` | ✅ Implementado | Botão de rebind de tecla com detecção de conflito |
 
 ---
 
@@ -209,10 +225,11 @@ IA exclusivamente no Host.
 
 ```
 UI/
-├── HUD/      → papel, missões, cooldowns, alertas
-├── Lobby/    → LobbyController, lista de jogadores
-├── Meeting/  → avatares, votos, timer
-└── Menus/    → MainMenuController, configurações, fim de partida
+├── Components/ → VolumeStepControl, RebindButton (reutilizáveis)
+├── HUD/        → papel, missões, cooldowns, alertas, FPSDisplay
+├── Lobby/      → LobbyController, PlayerListItem
+├── Meeting/    → avatares, votos, timer
+└── Menus/      → MainMenuController, SettingsController
 ```
 
 ---
@@ -225,12 +242,43 @@ Prefabs/
 │   ├── NetworkManager.prefab         ✅ criado e configurado
 │   ├── PlayerNetworkObject.prefab    ⏳ próximas sessões
 │   └── MatchNetworkState.prefab      ⏳ futuro
+├── UI/
+│   └── PlayerListItem.prefab         🔄 próxima sessão (lista do Lobby)
 ├── Players/
-├── Environment/
-└── UI/
+└── Environment/
 ```
 
-**Regra crítica:** Todo prefab spawnado pela rede DEVE ter `NetworkObject` e estar na `Network Prefabs List` do `NetworkManager`.
+---
+
+## `Audio/`
+
+```
+Audio/
+└── GameAudioMixer.mixer    ✅ criado
+    ├── Master   → VolGeral  (parâmetro exposto)
+    ├── Musica   → VolMusica (parâmetro exposto)
+    ├── SFX      → VolSFX   (parâmetro exposto)
+    └── Chat     → VolChat   (parâmetro exposto)
+```
+
+---
+
+## `Input/`
+
+```
+Input/
+└── EchoesInputActions.inputactions    ✅ criado
+    └── Action Map: Gameplay
+        ├── Mover (Vector2 — WASD Composite)
+        ├── Interagir (E)
+        ├── Chat (T)
+        ├── Info (I)
+        ├── Spray (X)
+        ├── Provocar (C)
+        ├── Ping (Middle Mouse)
+        ├── Mapa (Space)
+        └── Habilidade (Left Shift)
+```
 
 ---
 
@@ -239,11 +287,9 @@ Prefabs/
 | Cena | Índice | Status | Função |
 |---|---|---|---|
 | `Bootstrap.unity` | 0 | ✅ Implementada | Entry point, nunca descarregada |
-| `MainMenu.unity` | 1 | 🔄 Próxima sessão | Tela inicial |
-| `Lobby.unity` | 2 | 🔄 Próxima sessão | Criação/entrada de sala |
+| `MainMenu.unity` | 1 | ✅ Implementada | Tela inicial + Settings completo |
+| `Lobby.unity` | 2 | 🔄 Em andamento | Criação/entrada de sala |
 | `Match.unity` | 3 | ⏳ Futuro | Gameplay |
-
-**Fluxo:** `Bootstrap` → `MainMenu` → `Lobby` → `Match` → (fim) → `Lobby`
 
 ---
 
@@ -268,12 +314,13 @@ Plugins/
 
 ---
 
-## `Tests/`
+## `Resources/`
 
 ```
-Tests/
-├── EditMode/    ← lógica pura: RoleSystem, TaskSystem, votação
-└── PlayMode/    ← integração: spawn, NetworkVariable
+Resources/
+└── Localization/       ← JSONs de localização (scaffold — implementação futura)
+    ├── pt-BR.json
+    └── en-US.json
 ```
 
 ---

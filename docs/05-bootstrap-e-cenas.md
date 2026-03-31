@@ -2,163 +2,183 @@
 
 [← Voltar ao índice](../README.md)
 
-> O que foi implementado, decisões tomadas durante a implementação e problemas resolvidos.  
-> Sessão concluída em 28/03/2026.
+> Histórico completo de implementação do Bootstrap: da versão inicial (sessão 1) até o fluxo de intro completo (sessão atual).  
+> Última atualização: 31/03/2026.
 
 ---
 
-## O que foi Implementado
+## Cenas do Projeto
 
-### 4 Cenas Criadas
+| Cena | Índice | Status | Função |
+|---|---|---|---|
+| `Bootstrap.unity` | 0 | ✅ Implementada | Entry point — nunca descarregada |
+| `MainMenu.unity` | 1 | ✅ Implementada | Tela inicial com Settings |
+| `Lobby.unity` | 2 | 🔄 Em andamento | Criação e entrada de sala |
+| `Match.unity` | 3 | ⏳ Futuro | Gameplay da partida |
 
-| Cena | Índice no Build Settings | Função |
-|---|---|---|
-| `Bootstrap.unity` | 0 (obrigatório primeiro) | Entry point — nunca descarregada |
-| `MainMenu.unity` | 1 | Tela inicial |
-| `Lobby.unity` | 2 | Criação e entrada de sala |
-| `Match.unity` | 3 | Gameplay da partida |
-
-> **Regra:** A Bootstrap.unity DEVE ser índice 0 no Build Settings. O Unity carrega a primeira cena automaticamente ao iniciar a build.
+> **Regra:** `Bootstrap.unity` DEVE ser índice 0 no Build Settings. O Unity carrega a primeira cena automaticamente ao iniciar a build.
 
 ---
 
-### NetworkManager Prefab
+## NetworkManager Prefab
 
 **Localização:** `Assets/_EchoesInTheDark/Prefabs/Network/NetworkManager.prefab`
 
-**Componentes configurados:**
-
 | Componente | Campo | Valor |
 |---|---|---|
-| Network Manager | Network Transport | NetworkManager (Unity Transport) |
 | Network Manager | Enable Scene Management | ✅ |
 | Network Manager | Load Scene Time Out | 120 |
-| Network Manager | Default Player Prefab | None (configurar na sessão do Player) |
+| Network Manager | Default Player Prefab | None |
 | Unity Transport | Protocol Type | **Relay Unity Transport** |
-| Unity Transport | Allow Remote Connections | ☐ (desabilitado — só para testes locais) |
 
-> **Decisão arquitetural:** O prefab fica configurado com `Relay Unity Transport` permanentemente. No editor (MPPM), o `Bootstrap.cs` sobrescreve o protocolo para IP direto em runtime via `SetConnectionData()`. Em produção, o fluxo de Lobby/Relay configura os dados corretos antes de `StartHost/Client`.
+> O prefab permanece configurado como Relay permanentemente. Em produção, o `LobbyController` chama `SetRelayServerData()` antes de `StartHost/Client`. No editor, o NGO é inicializado limpo (sem auto-connect) e o Lobby cuida de tudo.
 
 ---
 
-### Hierarquia da Cena Bootstrap
+## Hierarquia da Cena Bootstrap
 
 ```
 Bootstrap.unity
 ├── Bootstrap          ← Bootstrap.cs (DontDestroyOnLoad)
-└── NetworkManager     ← Network Manager + Unity Transport (DontDestroyOnLoad)
+├── NetworkManager     ← Network Manager + Unity Transport (DontDestroyOnLoad)
+├── SceneLoader        ← SceneLoader.cs (DontDestroyOnLoad)
+├── SettingsManager    ← SettingsManager.cs (DontDestroyOnLoad)
+├── InputManager       ← InputManager.cs (DontDestroyOnLoad)
+└── Canvas             ← UI de intro (destruída ao carregar MainMenu)
+    ├── PanelLogo      ← logo do estúdio (ativo por padrão)
+    ├── PanelIntro     ← animação/vídeo de intro (inativo)
+    └── PanelLoading   ← barra de progresso + status (inativo)
 ```
-
-> **Sem câmera:** A Bootstrap não renderiza nada. A câmera fica na MainMenu e demais cenas.
 
 ---
 
-### Bootstrap.cs
+## Fluxo do Bootstrap.cs
 
-**Localização:** `Assets/_EchoesInTheDark/Scripts/Core/Bootstrap.cs`  
-**Namespace:** `EchoesInTheDark.Core`
-
-**Responsabilidades em ordem de execução:**
+### Versão atual — fluxo completo com intro
 
 ```
 Awake()
   │
   ├── DontDestroyOnLoad(gameObject)
   │
-  ├── InitializeServicesAsync()
-  │     ├── Verifica se já inicializado (idempotente)
-  │     └── UnityServices.InitializeAsync()
+  ├── InitializeServicesAsync()  ← roda EM PARALELO com as telas de intro
+  │     ├── InitializationOptions.SetProfile($"Player_{PID}")
+  │     │     └── Isola sessão de autenticação por processo (MPPM safe)
+  │     ├── UnityServices.InitializeAsync(options)
+  │     ├── AuthenticationService.Instance.SignInAnonymouslyAsync()
+  │     └── _servicesReady = true  (ou _servicesFailed = true em erro)
   │
-  ├── AutoConnectInEditor()        ← só compila em #if UNITY_EDITOR
-  │     ├── Lê args de linha de comando
-  │     ├── Detecta -mppmTag <valor>
-  │     ├── SetConnectionData("127.0.0.1", 7777)  ← IP direto no editor
-  │     ├── Virtual Player (tag conhecida) → StartClient()
-  │     └── Main Editor (sem tag) → StartHost()
+  ├── ShowLogoAsync()
+  │     ├── Ativa PanelLogo
+  │     ├── Aguarda _logoDuration segundos (serializável no Inspector)
+  │     ├── Skip: Keyboard.current.anyKey.wasPressedThisFrame (polling)
+  │     └── Desativa PanelLogo + 2 frames de folga (evita input vazar)
+  │
+  ├── ShowIntroAsync()
+  │     ├── Ativa PanelIntro
+  │     ├── _videoPlayer.Prepare() → aguarda isPrepared
+  │     ├── Subscreve _videoPlayer.loopPointReached via TaskCompletionSource
+  │     ├── _videoPlayer.Play()
+  │     ├── 3 frames de folga pós-Play (estabilização)
+  │     ├── Loop: aguarda videoFinished.Task OU qualquer tecla
+  │     └── _videoPlayer.Stop() + Desativa PanelIntro
+  │
+  ├── ShowLoadingAsync()
+  │     ├── Ativa PanelLoading
+  │     ├── Loop: aguarda _servicesReady com timeout de 15s
+  │     │     └── _progressBar.value sobe até 90% durante espera
+  │     ├── SE timeout → _servicesFailed = true
+  │     ├── SE falha → exibe _textErro (jogo não avança)
+  │     └── SE sucesso → _progressBar = 1.0, aguarda 500ms, avança
   │
   └── LoadMainMenu()
         └── SceneManager.LoadScene("MainMenu", Single)
 ```
 
----
+### Por que inicializar serviços em paralelo com a intro?
 
-### Solução do Auto-Connect (MPPM 2.x)
-
-**Problema encontrado:** O pacote Multiplayer Play Mode 2.0.2 migrou o código `CurrentPlayer` para dentro do engine Unity 6.3. O namespace `Unity.Multiplayer.Playmode` não está mais acessível via `using` convencional em scripts de usuário sem Assembly Definition configurado.
-
-**Solução adotada:** Leitura de argumentos de linha de comando injetados pelo MPPM:
-
-```csharp
-// O MPPM injeta -mppmTag <valor> em cada Virtual Player
-string[] args = Environment.GetCommandLineArgs();
-for (int i = 0; i < args.Length; i++)
-{
-    if (args[i] == "-mppmTag" && i + 1 < args.Length)
-    {
-        string tag = args[i + 1].ToLower();
-        isVirtualPlayer = tag == "vampire" || tag == "innocent" || tag == "guard";
-        break;
-    }
-}
-```
-
-**Por que funciona:** O MPPM injeta `-mppmTag <valor>` nos argumentos de cada Virtual Player desde a versão 1.0.0 e esse mecanismo nunca foi removido (verificado no CHANGELOG até 2.0.2). Não depende de namespace externo — apenas `System.Environment`.
+O `SignInAnonymouslyAsync()` + `UnityServices.InitializeAsync()` demora 1–3 segundos dependendo da conexão. Em vez de exibir uma tela de loading imediatamente, aproveitamos esse tempo para mostrar a logo e o vídeo de intro. Quando o jogador chega na tela de loading, os serviços geralmente já estão prontos — a barra de progresso serve como fallback visual se ainda não terminou.
 
 ---
 
-### Solução do Relay no Editor
+## Perfil por PID — Isolamento MPPM
 
-**Problema encontrado:** Com `Protocol Type = Relay Unity Transport`, o `StartHost()` lança exceção imediatamente:
-```
-Exception: You must call SetRelayServerData() before calling StartClient() or StartServer()
-```
+**Problema:** Sem perfis separados, todas as instâncias MPPM compartilham o mesmo cache de autenticação. O Relay rejeita `JoinAllocationAsync` com "Not Found" porque a sessão do Virtual Player está contaminada pela sessão do Main Editor.
 
-**Solução adotada:** Sobrescrever o protocolo em runtime apenas no editor:
+**Solução:**
 
 ```csharp
+var options = new InitializationOptions();
 #if UNITY_EDITOR
-Unity.Netcode.Transports.UTP.UnityTransport transport =
-    NetworkManager.Singleton.GetComponent<Unity.Netcode.Transports.UTP.UnityTransport>();
-
-transport.SetConnectionData("127.0.0.1", 7777);
-// SetConnectionData() muda internamente o protocol para IP direto
+string profile = $"Player_{System.Diagnostics.Process.GetCurrentProcess().Id}";
+options.SetProfile(profile);
 #endif
+await UnityServices.InitializeAsync(options);
 ```
 
-**Decisão arquitetural:** O prefab permanece configurado como Relay (para produção). O Bootstrap só altera isso em runtime no editor. Em produção, o `RelayService.cs` (sessão futura) chamará `SetRelayServerData()` com os dados reais antes de `StartHost/Client`.
+Cada instância MPPM é um processo separado com PID único. O perfil garante que cada instância tem sua própria sessão de autenticação, PlayerID e cache de Relay — sem contaminação cruzada.
+
+**Resultado esperado no console:**
+```
+[Bootstrap] Perfil: Player_10196   ← Main Editor
+[Bootstrap] Perfil: Player_27520   ← Virtual Player (PID diferente)
+```
 
 ---
 
-## Problemas Resolvidos
+## Auto-Connect — Decisão de Remoção
+
+Na sessão inicial, `Bootstrap.cs` continha `AutoConnectInEditor()` que chamava `StartHost()` ou `StartClient()` direto, via detecção de `-mppmTag` nos args de linha de comando.
+
+**Por que foi removido:**
+- O Lobby agora gerencia toda a conexão (Host via Relay, Client via código)
+- O auto-connect conflitava com o fluxo do Lobby — o NGO já estava como Host quando o usuário clicava "Criar Sala", causando o erro `Cannot start Host while an instance is already running`
+- A solução foi mover toda a responsabilidade de conexão para o `LobbyController`
+- O `Bootstrap` agora inicializa serviços e carrega o MainMenu — apenas isso
+
+---
+
+## Singletons DontDestroyOnLoad
+
+Todos os singletons que persistem entre cenas são instanciados na `Bootstrap.unity`:
+
+| Singleton | Script | Responsabilidade |
+|---|---|---|
+| `Bootstrap` | `Bootstrap.cs` | Entry point, fluxo de intro |
+| `NetworkManager` | (Unity) | Conexão NGO |
+| `SceneLoader` | `SceneLoader.cs` | Navegação entre cenas |
+| `SettingsManager` | `SettingsManager.cs` | Configurações + PlayerPrefs |
+| `InputManager` | `InputManager.cs` | InputActionAsset + overrides |
+
+---
+
+## Problemas Resolvidos (histórico completo)
 
 | Problema | Causa | Solução |
 |---|---|---|
-| Namespace `Unity.Multiplayer.Playmode` não encontrado | MPPM 2.0 migrou código para o engine | Usar `Environment.GetCommandLineArgs()` |
-| `ReadOnlyTags()` obsoleto | API atualizada no MPPM 2.x | Substituído por leitura de args |
-| `SetRelayServerData()` obrigatório | Transport em modo Relay exige dados antes de Start | `SetConnectionData()` no editor sobrescreve para IP direto |
-| `NetworkPrefab cannot be null` | Entrada vazia na lista de prefabs | Remover entrada vazia no Inspector → Apply All |
-| `[Vivox] server is null or empty` | Vivox instalado sem projeto configurado | Remover pacote Vivox pelo Package Manager |
-| Warning `[SerializeReference] Serializable` | Bug interno do pacote Multiplayer Center | Ignorar — não tem solução do lado do desenvolvedor |
-| `var` com `GetComponent<>` em linha quebrada | C# 9.0 não suporta `target-typed new` com tipo genérico multi-linha | Usar tipo explícito em linha única |
+| `Unity.Multiplayer.Playmode` não encontrado | MPPM 2.0 migrou para engine | `Environment.GetCommandLineArgs()` |
+| `SetRelayServerData()` obrigatório | Transport Relay exige dados antes de Start | Auto-connect removido; Lobby gerencia |
+| `Cannot start Host while running` | Bootstrap chamava StartHost + Lobby também | Remover AutoConnectInEditor |
+| `Not Found: join code not found` | Perfis MPPM compartilhados; sessão contaminada | `SetProfile($"Player_{PID}")` |
+| `NetworkPrefab cannot be null` | Entrada vazia na lista de prefabs | Remover entrada vazia → Apply All |
+| `[Vivox] server is null or empty` | Vivox instalado sem configuração | Remover pacote Vivox |
+| VideoPlayer pula intro | `VideoPlayer.length` retorna 0; `CallOnce` vaza | `loopPointReached` + `TaskCompletionSource` |
+| "HOLD E" no texto de rebind | `GetBindingDisplayString` inclui modificadores | `InputControlPath.ToHumanReadableString` com `OmitDevice` |
+| Rebind em Composite | `PerformInteractiveRebinding` rejeita index 0 (WASD) | Verificar `isComposite` antes de iniciar |
 
 ---
 
-## Resultado Final do Console (Play Mode)
+## Console esperado (Play Mode — estado atual)
 
 ```
-✅ [Bootstrap] Inicializando Unity Services...
+✅ [Bootstrap] Perfil: Player_XXXXX
 ✅ [Bootstrap] Unity Services prontos.
-✅ [Bootstrap] Main Editor → StartHost (IP direto)
+✅ [Bootstrap] Autenticado. PlayerID: XXXXXXXXXXXX
+✅ [Bootstrap] Vídeo iniciado. Aguardando término ou skip...
+✅ [Bootstrap] Intro encerrada. Skip: False
+✅ [Bootstrap] Pronto!
 ✅ [Bootstrap] Carregando MainMenu...
-```
-
-Hierarchy em runtime:
-```
-MainMenu
-DontDestroyOnLoad
-  ├── Bootstrap
-  ├── NetworkManager
-  └── [Debug Updater]   ← gerado pelo Multiplayer Tools, normal
+✅ [SettingsManager] Configurações carregadas e aplicadas.
 ```
 
 ---

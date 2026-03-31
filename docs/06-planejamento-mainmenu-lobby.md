@@ -592,7 +592,181 @@ private void Update()
 - [ ] Linkar GameObjects ao `LobbyController` no Inspector
 - [ ] Testar com MPPM: Main Editor cria sala, Virtual Player entra com código
 - [ ] Confirmar conexão real via Relay (não IP direto)
-- [ ] Implementar heartbeat no Update do LobbyController
+- [ ] Implementar heartbeat no Update do LobbyControl# 06 · Sessão B — Lobby: Conexão via Relay
+
+[← Voltar ao índice](../README.md)
+
+> O que foi implementado na sessão B: fluxo completo de conexão Host + Client via Unity Relay e Unity Lobby.  
+> Sessão concluída em 31/03/2026.  
+> **Próxima sessão:** ver [08 · Lobby Completo](08-planejamento-lobby-completo.md)
+
+---
+
+## Scripts Implementados
+
+| Script | Namespace | Localização |
+|---|---|---|
+| `RelayNetworkService.cs` | `EchoesInTheDark.Services` | `Scripts/Services/` |
+| `LobbyNetworkService.cs` | `EchoesInTheDark.Services` | `Scripts/Services/` |
+| `LobbyController.cs` | `EchoesInTheDark.UI` | `Scripts/UI/Lobby/` |
+
+---
+
+## RelayNetworkService.cs
+
+Abstrai completamente o SDK do Relay. Nenhum outro script chama o SDK diretamente.
+
+### Por que o nome não é `RelayService`?
+
+A classe do SDK chama-se `Unity.Services.Relay.RelayService`. Se a nossa classe também se chamasse `RelayService`, haveria ambiguidade de nome e o compilador resolveria para a classe local — `RelayService.Instance` chamaria a si mesma em loop. Solução: `RelayNetworkService`.
+
+### Construtor manual de `RelayServerData`
+
+O Unity Transport 2.x removeu o construtor de conveniência `RelayServerData(Allocation, "dtls")`. É necessário passar os campos manualmente:
+
+```csharp
+// HOST — hostConnectionData == connectionData (host é ele mesmo)
+transport.SetRelayServerData(new RelayServerData(
+    allocation.RelayServer.IpV4,
+    (ushort)allocation.RelayServer.Port,
+    allocation.AllocationIdBytes,
+    allocation.ConnectionData,
+    allocation.ConnectionData,  // ← mesmo que connectionData para o Host
+    allocation.Key,
+    isSecure: true
+));
+
+// CLIENT — hostConnectionData vem do campo separado JoinAllocation
+transport.SetRelayServerData(new RelayServerData(
+    joinAllocation.RelayServer.IpV4,
+    (ushort)joinAllocation.RelayServer.Port,
+    joinAllocation.AllocationIdBytes,
+    joinAllocation.ConnectionData,
+    joinAllocation.HostConnectionData,  // ← dados do Host remoto
+    joinAllocation.Key,
+    isSecure: true
+));
+```
+
+---
+
+## LobbyNetworkService.cs
+
+Abstrai o Unity Lobby Service. O `RelayJoinCode` é armazenado nos metadados da sala como `DataObject.VisibilityOptions.Member` — visível apenas para membros do Lobby.
+
+```
+HOST
+  CreateLobby(name, relayJoinCode)
+    └── IsPrivate = true → acesso só por código de 6 letras
+    └── Data["RelayJoinCode"] = relayJoinCode
+
+CLIENT
+  JoinLobbyAndGetRelayCode(lobbyCode)
+    └── JoinLobbyByCodeAsync(lobbyCode)
+    └── retorna lobby.Data["RelayJoinCode"].Value
+```
+
+**Heartbeat:** O Unity Lobby remove salas sem atividade após 30s. O `LobbyController` chama `SendHeartbeat()` a cada 15s no `Update()`, mas apenas quando `NetworkManager.Singleton.IsHost`.
+
+---
+
+## LobbyController.cs
+
+Coordena a UI com os dois serviços. Separação estrita: UI não chama SDK, Controller coordena Services.
+
+### Fluxo Host
+
+```
+OnCriarSalaClicked()
+  1. ShutdownIfRunningAsync()        ← sempre limpa estado NGO antes
+  2. RelayNetworkService.CreateRelayAndGetJoinCode()
+  3. LobbyNetworkService.CreateLobby("EitD-Sala", relayCode)
+  4. _textCodigo.text = lobbyCode
+  5. NetworkManager.Singleton.StartHost()
+  6. ShowPanel(_panelHost)
+```
+
+### Fluxo Client
+
+```
+OnEntrarClicked()
+  1. LobbyNetworkService.JoinLobbyAndGetRelayCode(codigo)
+  2. RelayNetworkService.JoinRelay(relayCode)
+  3. NetworkManager.Singleton.StartClient()
+```
+
+### ShutdownIfRunningAsync — por que sempre chamar?
+
+```csharp
+private async Task ShutdownIfRunningAsync()
+{
+    NetworkManager.Singleton.Shutdown(); // idempotente — seguro chamar sempre
+    await Task.Yield();                  // 1 frame para NGO limpar estado interno
+}
+```
+
+`Shutdown()` é idempotente — chamar quando o NGO não está rodando não causa erro. Chamar sempre garante que estado residual de conexões anteriores seja limpo antes de uma nova tentativa.
+
+---
+
+## Problemas Resolvidos nesta Sessão
+
+| Problema | Causa | Solução |
+|---|---|---|
+| `You are not signed in to Authentication` | `UnityServices.InitializeAsync()` sem `SignInAnonymously` | Adicionado no Bootstrap |
+| `Cannot start Host while running` | Bootstrap chamava `StartHost` + Lobby também | `ShutdownIfRunningAsync()` sempre antes |
+| `RelayServerData` sem construtor de conveniência | Unity Transport 2.x removeu o overload | Construtor manual com todos os campos |
+| Perfis MPPM compartilhados | Virtual Players usavam mesmo cache de autenticação | `SetProfile($"Player_{PID}")` no Bootstrap |
+
+---
+
+## ⚠️ Problema Conhecido — Join Code Not Found (Relay)
+
+**Sintoma:**
+```
+[LobbyNetworkService] Entrou no Lobby. RelayCode: XXXXXX   ← Lobby OK
+[LobbyController] Erro ao entrar na sala: Not Found: join code not found  ← Relay falha
+```
+
+O `JoinLobbyAndGetRelayCode` funciona — o client entra no Lobby e recupera o RelayCode corretamente. Porém, `RelayService.Instance.JoinAllocationAsync(relayCode)` retorna "Not Found".
+
+**Hipóteses investigadas:**
+- Perfis MPPM — **parcialmente resolvido** com `SetProfile(PID)`. Em algumas execuções o erro persiste.
+- Estado interno do NGO — `ShutdownIfRunningAsync` resolve conflito de conexão anterior
+- Alocação Relay expirada — o Relay expira alocações após um tempo sem StartHost
+
+**Status:** Em investigação. A próxima sessão foca exclusivamente no Lobby — a lista de players conectados em tempo real facilitará o diagnóstico visual do estado da conexão.
+
+**O que JÁ funciona:**
+- ✅ Host cria sala com sucesso
+- ✅ Código do Lobby é gerado e exibido
+- ✅ Client entra no Lobby e recupera o RelayCode
+- ✅ Em algumas execuções, a conexão Relay completa com sucesso (`[LobbyController] Client conectado via Relay`)
+
+---
+
+## Console esperado — fluxo Host
+
+```
+✅ [LobbyController] Limpando estado do NetworkManager...
+✅ [RelayNetworkService] Alocação criada. JoinCode: XXXXXX
+✅ [LobbyNetworkService] Lobby criado. ID: YYYY | Código: ZZZZZZ
+✅ [LobbyController] Host iniciado via Relay. Código: ZZZZZZ
+```
+
+## Console esperado — fluxo Client (quando funciona)
+
+```
+✅ [LobbyNetworkService] Entrou no Lobby. RelayCode: XXXXXX
+✅ [RelayNetworkService] Tentando JoinAllocationAsync com código: 'XXXXXX' (len: 6)
+✅ [RelayNetworkService] Conectado ao Relay. JoinCode: XXXXXX
+✅ [LobbyController] Client conectado via Relay.
+```
+
+---
+
+*[← Voltar ao índice](../README.md)*
+ler
 
 ---
 
