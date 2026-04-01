@@ -1,3 +1,4 @@
+using System;
 using System.Threading.Tasks;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
@@ -11,12 +12,16 @@ namespace EchoesInTheDark.Services
     /// <summary>
     /// Abstrai o Unity Relay Service.
     /// Host: aloca servidor e obtém JoinCode.
-    /// Client: entra na alocação usando o JoinCode.
-    /// Usa o construtor manual de RelayServerData (Unity Transport 2.x — sem construtor de conveniência).
+    /// Client: entra na alocação usando o JoinCode (com retry automático).
+    /// Usa o construtor manual de RelayServerData (Unity Transport 2.x).
     /// </summary>
     public class RelayNetworkService
     {
-        private const int MAX_CONNECTIONS = 15;
+        private const int MAX_CONNECTIONS      = 15;
+        private const int JOIN_MAX_RETRIES     = 3;
+        private const int JOIN_RETRY_BASE_MS   = 1500; // 1.5s → 3s (backoff exponencial)
+
+        // ── Host ──────────────────────────────────────────────────────────
 
         /// <summary>
         /// [HOST] Cria alocação Relay e retorna o JoinCode de 6 caracteres.
@@ -36,39 +41,78 @@ namespace EchoesInTheDark.Services
                 (ushort)allocation.RelayServer.Port,
                 allocation.AllocationIdBytes,
                 allocation.ConnectionData,
-                allocation.ConnectionData,  // hostConnectionData = connectionData para o Host
+                allocation.ConnectionData, // hostConnectionData = connectionData para o Host
                 allocation.Key,
-                isSecure: true              // DTLS
+                isSecure: true             // DTLS obrigatório
             ));
 
             Debug.Log($"[RelayNetworkService] Alocação criada. JoinCode: {joinCode}");
             return joinCode;
         }
 
+        // ── Client ────────────────────────────────────────────────────────
+
         /// <summary>
         /// [CLIENT] Entra na alocação Relay pelo JoinCode.
         /// Já configura o Transport antes de retornar.
+        ///
+        /// FIX "Join Code Not Found":
+        ///   1. Normaliza o código (.Trim().ToUpper()) — Relay é case-sensitive.
+        ///   2. Retry com backoff exponencial (até JOIN_MAX_RETRIES tentativas).
+        ///      Falhas transientes de rede ou propagação da alocação são recuperáveis.
         /// </summary>
         public async Task JoinRelay(string joinCode)
         {
-            Debug.Log($"[RelayNetworkService] Tentando JoinAllocationAsync com código: '{joinCode}' (len: {joinCode?.Length})");
+            if (string.IsNullOrWhiteSpace(joinCode))
+                throw new ArgumentException("JoinCode não pode ser vazio.", nameof(joinCode));
 
-            JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(joinCode);
+            // Normaliza: remove espaços e garante maiúsculas
+            joinCode = joinCode.Trim().ToUpper();
+            Debug.Log($"[RelayNetworkService] JoinCode normalizado: '{joinCode}' (len={joinCode.Length})");
 
-            var transport = NetworkManager.Singleton.GetComponent<UnityTransport>();
+            Exception lastException = null;
 
-            // Para o Client, hostConnectionData vem separado (dados do Host)
-            transport.SetRelayServerData(new RelayServerData(
-                joinAllocation.RelayServer.IpV4,
-                (ushort)joinAllocation.RelayServer.Port,
-                joinAllocation.AllocationIdBytes,
-                joinAllocation.ConnectionData,
-                joinAllocation.HostConnectionData,  // dados do Host — diferente do Client
-                joinAllocation.Key,
-                isSecure: true
-            ));
+            for (int attempt = 1; attempt <= JOIN_MAX_RETRIES; attempt++)
+            {
+                try
+                {
+                    Debug.Log($"[RelayNetworkService] JoinAllocationAsync tentativa {attempt}/{JOIN_MAX_RETRIES}...");
 
-            Debug.Log($"[RelayNetworkService] Conectado ao Relay. JoinCode: {joinCode}");
+                    JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(joinCode);
+
+                    var transport = NetworkManager.Singleton.GetComponent<UnityTransport>();
+
+                    // Para o Client, hostConnectionData vem separado (dados do Host remoto)
+                    transport.SetRelayServerData(new RelayServerData(
+                        joinAllocation.RelayServer.IpV4,
+                        (ushort)joinAllocation.RelayServer.Port,
+                        joinAllocation.AllocationIdBytes,
+                        joinAllocation.ConnectionData,
+                        joinAllocation.HostConnectionData, // diferente do Host: são os dados do Host remoto
+                        joinAllocation.Key,
+                        isSecure: true
+                    ));
+
+                    Debug.Log($"[RelayNetworkService] Relay configurado com sucesso na tentativa {attempt}.");
+                    return;
+                }
+                catch (Exception e)
+                {
+                    lastException = e;
+                    Debug.LogWarning($"[RelayNetworkService] Tentativa {attempt}/{JOIN_MAX_RETRIES} falhou: {e.Message}");
+
+                    if (attempt < JOIN_MAX_RETRIES)
+                    {
+                        int delayMs = JOIN_RETRY_BASE_MS * attempt; // 1.5s, 3s
+                        Debug.Log($"[RelayNetworkService] Aguardando {delayMs}ms antes da próxima tentativa...");
+                        await Task.Delay(delayMs);
+                    }
+                }
+            }
+
+            throw new Exception(
+                $"[RelayNetworkService] Falha ao entrar no Relay após {JOIN_MAX_RETRIES} tentativas. " +
+                $"Último erro: {lastException?.Message}", lastException);
         }
     }
 }

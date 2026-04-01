@@ -22,7 +22,7 @@
 | ✅ Sistema de Settings | Concluído | 4 abas: Geral, Gráficos, Som, Controles |
 | ✅ AudioMixer | Concluído | 4 canais expostos: VolGeral, VolMusica, VolSFX, VolChat |
 | ✅ Sistema de Rebind | Concluído | Rebind de teclas com detecção de conflito e bloqueio de ESC |
-| 🔄 Lobby — Interface completa | Em andamento | Lista de players, loading, código mascarado, botão Pronto |
+| ✅ Lobby — Interface completa | Concluído | Lista de players, loading, código mascarado, botão Pronto |
 | ⏳ Player base | Pendente | NetworkObject + movimento sincronizado |
 | ⏳ Match scene | Pendente | Gameplay completo |
 
@@ -43,7 +43,7 @@
 
 ### Planejamento
 - [06 · Sessão B — Lobby Conexão](docs/06-planejamento-mainmenu-lobby.md) — Relay + Lobby implementados, problemas conhecidos
-- [08 · Sessão C — Lobby Completo](docs/08-planejamento-lobby-completo.md) — Próxima sessão: lista de players, loading, código mascarado, botão Pronto
+- [08 · Sessão C — Lobby Completo](docs/08-planejamento-lobby-completo.md) — ✅ Concluído: PlayerListItem prefab, PanelSala unificado, relay retry fix, botão Pronto
 
 ### Sistemas do Jogo
 - [Sistema · Personagem](docs/sistemas/sistema-personagem.md)

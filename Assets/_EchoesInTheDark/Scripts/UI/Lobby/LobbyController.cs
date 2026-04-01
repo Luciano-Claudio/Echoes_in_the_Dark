@@ -1,69 +1,130 @@
 using System;
+using System.Collections;
+using System.Threading.Tasks;
+using TMPro;
+using Unity.Netcode;
+using Unity.Services.Lobbies.Models;
 using UnityEngine;
 using UnityEngine.UI;
-using TMPro;
-using EchoesInTheDark.Services;
 using EchoesInTheDark.Core;
-using Unity.Netcode;
-using System.Threading.Tasks;
+using EchoesInTheDark.Services;
 
 namespace EchoesInTheDark.UI
 {
     /// <summary>
     /// Coordena a UI do Lobby com os serviços de Relay e Lobby.
     /// Separação estrita: UI não chama SDK — Controller coordena Services.
+    ///
+    /// Fluxo Host:
+    ///   PanelEscolha → [PanelLoading] → PanelSala (com BotaoIniciarPartida)
+    ///
+    /// Fluxo Client:
+    ///   PanelEscolha → PanelEntrarCodigo → [PanelLoading] → PanelSala (com BotaoPronto)
     /// </summary>
     public class LobbyController : MonoBehaviour
     {
-        [Header("Painéis")]
+        // ── Painéis ───────────────────────────────────────────────────────
+
+        [Header("Painéis Principais")]
         [SerializeField] private GameObject _panelEscolha;
-        [SerializeField] private GameObject _panelHost;
-        [SerializeField] private GameObject _panelClient;
+        [SerializeField] private GameObject _panelLoading;       // spinner durante ops assíncronas
+        [SerializeField] private GameObject _panelEntrarCodigo;  // client digita o código aqui
+        [SerializeField] private GameObject _panelSala;          // painel compartilhado (host + client)
 
-        [Header("Painel Host")]
-        [SerializeField] private TextMeshProUGUI _textCodigo;
+        // ── Painel Loading ────────────────────────────────────────────────
+
+        [Header("Loading")]
+        [SerializeField] private TextMeshProUGUI _textLoading;
+
+        // ── Painel Escolha ────────────────────────────────────────────────
+
+        [Header("Painel Escolha")]
         [SerializeField] private Button _buttonCriarSala;
-        [SerializeField] private Button _buttonIniciarPartida;
-        [SerializeField] private Button _buttonVoltarHost;
+        [SerializeField] private Button _buttonAbrirEntrarCodigo; // abre PanelEntrarCodigo
 
-        [Header("Painel Client")]
+        // ── Painel Entrar Código ──────────────────────────────────────────
+
+        [Header("Painel Entrar Código")]
         [SerializeField] private TMP_InputField _inputCodigo;
-        [SerializeField] private Button _buttonEntrarCodigo;  // abre o PanelClient
-        [SerializeField] private Button _buttonEntrar;        // confirma entrada
-        [SerializeField] private Button _buttonVoltarClient;
+        [SerializeField] private Button         _buttonEntrar;
+        [SerializeField] private Button         _buttonVoltarEntrar;
 
-        // Serviços instanciados localmente (sem DI por enquanto)
+        // ── Painel Sala — Código ──────────────────────────────────────────
+
+        [Header("Painel Sala — Código")]
+        [SerializeField] private TextMeshProUGUI _textCodigo;   // "••••••" ou código real
+        [SerializeField] private Button          _buttonOlho;   // toggle visibilidade
+        [SerializeField] private Button          _buttonCopiar; // copia para clipboard
+
+        // ── Painel Sala — Jogadores ───────────────────────────────────────
+
+        [Header("Painel Sala — Jogadores")]
+        [SerializeField] private TextMeshProUGUI          _textJogadoresCount;
+        [SerializeField] private Transform                _playerListContainer;
+        [SerializeField] private PlayerListItemController _playerListItemPrefab;
+
+        // ── Painel Sala — Ações ───────────────────────────────────────────
+
+        [Header("Painel Sala — Ações")]
+        [SerializeField] private Button _buttonIniciarPartida; // host only
+        [SerializeField] private Button _buttonPronto;         // client only
+        [SerializeField] private Button _buttonSair;           // ambos
+
+        // ── Serviços ──────────────────────────────────────────────────────
+
         private readonly RelayNetworkService _relayService = new RelayNetworkService();
         private readonly LobbyNetworkService _lobbyService = new LobbyNetworkService();
 
-        private float _heartbeatTimer;
-        private const float HEARTBEAT_INTERVAL = 15f;
+        // ── Estado ────────────────────────────────────────────────────────
 
-        // ── Ciclo de vida ──────────────────────────────────────────────────
+        private const float HEARTBEAT_INTERVAL = 15f;
+        private const float POLL_INTERVAL      = 2f;
+        private const int   MAX_PLAYERS        = 15;
+
+        private float  _heartbeatTimer;
+        private bool   _codigoVisivel;
+        private bool   _clienteEstaPronto;
+        private bool   _isRefreshing;        // guard: evita polls simultâneos
+        private string _lobbyCodeReal;       // código verdadeiro (toggle + clipboard)
+
+        private Coroutine _pollCoroutine;
+
+        // ── Lifecycle ─────────────────────────────────────────────────────
 
         private void OnEnable()
         {
             _buttonCriarSala.onClick.AddListener(OnCriarSalaClicked);
-            _buttonEntrarCodigo.onClick.AddListener(OnEntrarCodigoClicked);
+            _buttonAbrirEntrarCodigo.onClick.AddListener(OnAbrirEntrarCodigoClicked);
+
             _buttonEntrar.onClick.AddListener(OnEntrarClicked);
+            _buttonVoltarEntrar.onClick.AddListener(OnVoltarParaEscolha);
+
+            _buttonOlho.onClick.AddListener(OnOlhoClicked);
+            _buttonCopiar.onClick.AddListener(OnCopiarClicked);
+
             _buttonIniciarPartida.onClick.AddListener(OnIniciarPartidaClicked);
-            _buttonVoltarHost.onClick.AddListener(OnVoltarClicked);
-            _buttonVoltarClient.onClick.AddListener(OnVoltarClicked);
+            _buttonPronto.onClick.AddListener(OnProntoClicked);
+            _buttonSair.onClick.AddListener(OnSairClicked);
         }
 
         private void OnDisable()
         {
             _buttonCriarSala.onClick.RemoveAllListeners();
-            _buttonEntrarCodigo.onClick.RemoveAllListeners();
+            _buttonAbrirEntrarCodigo.onClick.RemoveAllListeners();
             _buttonEntrar.onClick.RemoveAllListeners();
+            _buttonVoltarEntrar.onClick.RemoveAllListeners();
+            _buttonOlho.onClick.RemoveAllListeners();
+            _buttonCopiar.onClick.RemoveAllListeners();
             _buttonIniciarPartida.onClick.RemoveAllListeners();
-            _buttonVoltarHost.onClick.RemoveAllListeners();
-            _buttonVoltarClient.onClick.RemoveAllListeners();
+            _buttonPronto.onClick.RemoveAllListeners();
+            _buttonSair.onClick.RemoveAllListeners();
+
+            StopPolling();
         }
 
         private void Update()
         {
-            // Heartbeat: só o Host envia, só enquanto estiver no Lobby
+            // Heartbeat: somente Host enquanto estiver no Lobby
             if (!NetworkManager.Singleton.IsHost) return;
 
             _heartbeatTimer += Time.deltaTime;
@@ -78,96 +139,271 @@ namespace EchoesInTheDark.UI
 
         private async void OnCriarSalaClicked()
         {
-            SetPrimaryButtonsInteractable(false);
+            ShowPanel(_panelLoading);
+            SetLoadingText("Criando sala...");
 
             try
             {
-                // Se Bootstrap já iniciou como Host via IP direto (editor),
-                // desconectar antes de reconectar via Relay
                 await ShutdownIfRunningAsync();
 
-                // 1. Aloca Relay — Transport já configurado após este await
                 string relayCode = await _relayService.CreateRelayAndGetJoinCode();
-
-                // 2. Cria Lobby com RelayCode nos metadados
                 await _lobbyService.CreateLobby("EitD-Sala", relayCode);
 
-                // 3. Exibe o código do Lobby (6 letras que o client digita)
-                _textCodigo.text = _lobbyService.GetLobbyCode();
-
-                // 4. Inicia o Host — Relay já configurado pelo RelayNetworkService
                 NetworkManager.Singleton.StartHost();
 
-                ShowPanel(_panelHost);
-                Debug.Log($"[LobbyController] Host iniciado via Relay. Código: {_lobbyService.GetLobbyCode()}");
+                _lobbyCodeReal = _lobbyService.GetLobbyCode();
+                ConfigureSalaParaHost();
+                AtualizarListaJogadores(_lobbyService.GetCurrentLobby());
+                StartPolling();
+
+                ShowPanel(_panelSala);
+                Debug.Log($"[LobbyController] Host iniciado. Lobby code: {_lobbyCodeReal}");
             }
             catch (Exception e)
             {
                 Debug.LogError($"[LobbyController] Erro ao criar sala: {e.Message}");
-                SetPrimaryButtonsInteractable(true);
+                ShowPanel(_panelEscolha);
             }
-        }
-
-        /// <summary>
-        /// Sempre chama Shutdown antes de StartHost/StartClient.
-        /// Shutdown() é idempotente — seguro chamar mesmo se NGO não está rodando.
-        /// Necessário para limpar estado residual de falhas de transport (ex: porta ocupada).
-        /// </summary>
-        private async Task ShutdownIfRunningAsync()
-        {
-            Debug.Log("[LobbyController] Limpando estado do NetworkManager...");
-            NetworkManager.Singleton.Shutdown();
-            await Task.Yield(); // aguarda um frame para o NGO limpar internamente
         }
 
         // ── Client ────────────────────────────────────────────────────────
 
-        private void OnEntrarCodigoClicked() => ShowPanel(_panelClient);
+        private void OnAbrirEntrarCodigoClicked() => ShowPanel(_panelEntrarCodigo);
 
         private async void OnEntrarClicked()
         {
-            string codigo = _inputCodigo.text.Trim().ToUpper();
-            if (string.IsNullOrEmpty(codigo)) return;
+            string codigoDigitado = _inputCodigo.text.Trim().ToUpper();
+            if (string.IsNullOrEmpty(codigoDigitado))
+            {
+                Debug.LogWarning("[LobbyController] Código vazio — ignorado.");
+                return;
+            }
 
-            SetPrimaryButtonsInteractable(false);
+            ShowPanel(_panelLoading);
+            SetLoadingText("Entrando na sala...");
 
             try
             {
-                // 1. Entra no Lobby e recupera o RelayCode dos metadados
-                string relayCode = await _lobbyService.JoinLobbyAndGetRelayCode(codigo);
+                await ShutdownIfRunningAsync();
 
-                // 2. Configura o Transport com os dados do Relay
-                await _relayService.JoinRelay(relayCode);
+                string relayCode = await _lobbyService.JoinLobbyAndGetRelayCode(codigoDigitado);
+                await _relayService.JoinRelay(relayCode); // FIX: retry automático dentro do JoinRelay
 
-                // 3. Conecta como Client — Relay já configurado
                 NetworkManager.Singleton.StartClient();
 
-                Debug.Log("[LobbyController] Client conectado via Relay.");
+                _lobbyCodeReal = _lobbyService.GetLobbyCode();
+                ConfigureSalaParaClient();
+                AtualizarListaJogadores(_lobbyService.GetCurrentLobby());
+                StartPolling();
+
+                ShowPanel(_panelSala);
+                Debug.Log($"[LobbyController] Client conectado. Lobby code: {_lobbyCodeReal}");
             }
             catch (Exception e)
             {
                 Debug.LogError($"[LobbyController] Erro ao entrar na sala: {e.Message}");
-                SetPrimaryButtonsInteractable(true);
+                ShowPanel(_panelEntrarCodigo);
             }
         }
 
-        // ── Match ─────────────────────────────────────────────────────────
+        private void OnVoltarParaEscolha()
+        {
+            _inputCodigo.text = string.Empty;
+            ShowPanel(_panelEscolha);
+        }
+
+        // ── Configuração de papel na Sala ─────────────────────────────────
+
+        private void ConfigureSalaParaHost()
+        {
+            _codigoVisivel = false;
+            AtualizarDisplayCodigo();
+
+            _buttonIniciarPartida.gameObject.SetActive(true);
+            _buttonIniciarPartida.interactable = false; // ativo só quando todos prontos
+            _buttonPronto.gameObject.SetActive(false);
+        }
+
+        private void ConfigureSalaParaClient()
+        {
+            _codigoVisivel     = false;
+            _clienteEstaPronto = false;
+            AtualizarDisplayCodigo();
+            AtualizarTextoBotaoPronto();
+
+            _buttonIniciarPartida.gameObject.SetActive(false);
+            _buttonPronto.gameObject.SetActive(true);
+        }
+
+        // ── Código Mascarado ──────────────────────────────────────────────
+
+        private void OnOlhoClicked()
+        {
+            _codigoVisivel = !_codigoVisivel;
+            AtualizarDisplayCodigo();
+        }
+
+        private void OnCopiarClicked()
+        {
+            if (string.IsNullOrEmpty(_lobbyCodeReal)) return;
+            GUIUtility.systemCopyBuffer = _lobbyCodeReal;
+            Debug.Log($"[LobbyController] '{_lobbyCodeReal}' copiado para o clipboard.");
+            // TODO: exibir toast "Copiado!" por 2s
+        }
+
+        private void AtualizarDisplayCodigo()
+        {
+            if (string.IsNullOrEmpty(_lobbyCodeReal))
+            {
+                _textCodigo.text = "------";
+                return;
+            }
+            _textCodigo.text = _codigoVisivel
+                ? _lobbyCodeReal
+                : new string('•', _lobbyCodeReal.Length); // "••••••"
+        }
+
+        // ── Sistema de Pronto ─────────────────────────────────────────────
+
+        private async void OnProntoClicked()
+        {
+            _buttonPronto.interactable = false;
+            _clienteEstaPronto         = !_clienteEstaPronto; // toggle otimista
+
+            try
+            {
+                await _lobbyService.UpdatePlayerReadyAsync(_clienteEstaPronto);
+                AtualizarTextoBotaoPronto();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[LobbyController] Erro ao atualizar Pronto: {e.Message}");
+                _clienteEstaPronto = !_clienteEstaPronto; // reverte em caso de falha
+                AtualizarTextoBotaoPronto();
+            }
+            finally
+            {
+                _buttonPronto.interactable = true;
+            }
+        }
+
+        private void AtualizarTextoBotaoPronto()
+        {
+            var label = _buttonPronto.GetComponentInChildren<TextMeshProUGUI>();
+            if (label != null)
+                label.text = _clienteEstaPronto ? "✓ Pronto" : "Pronto";
+        }
+
+        // ── Iniciar Partida ───────────────────────────────────────────────
 
         private void OnIniciarPartidaClicked()
         {
             if (!NetworkManager.Singleton.IsHost) return;
-            // TODO (sessão futura): validar número mínimo de jogadores
+            StopPolling();
+            // TODO (sessão futura): usar NetworkManager.SceneManager.LoadScene
+            // para garantir que todos os clients também transicionem.
             SceneLoader.Instance.GoToMatch();
         }
 
-        // ── Navegação ─────────────────────────────────────────────────────
+        // ── Polling ───────────────────────────────────────────────────────
 
-        private void OnVoltarClicked()
+        private void StartPolling()
         {
-            // Sempre desconectar antes de voltar — evita "já conectado" em nova tentativa
+            StopPolling();
+            _pollCoroutine = StartCoroutine(PollLobbyCoroutine());
+        }
+
+        private void StopPolling()
+        {
+            if (_pollCoroutine == null) return;
+            StopCoroutine(_pollCoroutine);
+            _pollCoroutine = null;
+        }
+
+        private IEnumerator PollLobbyCoroutine()
+        {
+            var wait = new WaitForSeconds(POLL_INTERVAL);
+            while (true)
+            {
+                yield return wait;
+                if (!_isRefreshing)
+                    _ = RefreshLobbyUI(); // fire-and-forget protegido por _isRefreshing
+            }
+        }
+
+        private async Task RefreshLobbyUI()
+        {
+            _isRefreshing = true;
+            try
+            {
+                Lobby lobby = await _lobbyService.RefreshLobbyAsync();
+                if (lobby == null) return;
+
+                AtualizarListaJogadores(lobby);
+
+                if (NetworkManager.Singleton.IsHost)
+                    AtualizarBotaoIniciar(lobby);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[LobbyController] Falha no polling: {e.Message}");
+            }
+            finally
+            {
+                _isRefreshing = false;
+            }
+        }
+
+        // ── Lista de Jogadores ────────────────────────────────────────────
+
+        private void AtualizarListaJogadores(Lobby lobby)
+        {
+            if (lobby == null) return;
+
+            foreach (Transform child in _playerListContainer)
+                Destroy(child.gameObject);
+
+            _textJogadoresCount.text = $"{lobby.Players.Count}/{MAX_PLAYERS} jogadores";
+
+            foreach (Player player in lobby.Players)
+            {
+                bool ehHost = player.Id == lobby.HostId;
+                bool pronto = ehHost || IsPlayerReady(player);
+                string nome = ObterNomeDisplay(player);
+
+                var item = Instantiate(_playerListItemPrefab, _playerListContainer);
+                item.Setup(nome, pronto, ehHost);
+            }
+        }
+
+        private void AtualizarBotaoIniciar(Lobby lobby)
+        {
+            bool podeIniciar = _lobbyService.TodosClientesProntos() && lobby.Players.Count >= 2;
+            _buttonIniciarPartida.interactable = podeIniciar;
+        }
+
+        private bool IsPlayerReady(Player player)
+        {
+            return player.Data != null &&
+                   player.Data.TryGetValue("IsReady", out var data) &&
+                   data.Value == "1";
+        }
+
+        private string ObterNomeDisplay(Player player)
+        {
+            string nome = player.Profile?.Name;
+            if (!string.IsNullOrEmpty(nome)) return nome;
+            int len = Mathf.Min(4, player.Id.Length);
+            return $"Jogador_{player.Id.Substring(0, len)}";
+        }
+
+        // ── Sair ──────────────────────────────────────────────────────────
+
+        private void OnSairClicked()
+        {
+            StopPolling();
             if (NetworkManager.Singleton.IsHost || NetworkManager.Singleton.IsClient)
                 NetworkManager.Singleton.Shutdown();
-
             SceneLoader.Instance.GoToMainMenu();
         }
 
@@ -176,15 +412,37 @@ namespace EchoesInTheDark.UI
         private void ShowPanel(GameObject target)
         {
             _panelEscolha.SetActive(false);
-            _panelHost.SetActive(false);
-            _panelClient.SetActive(false);
+            _panelLoading.SetActive(false);
+            _panelEntrarCodigo.SetActive(false);
+            _panelSala.SetActive(false);
             target.SetActive(true);
         }
 
-        private void SetPrimaryButtonsInteractable(bool value)
+        private void SetLoadingText(string texto) => _textLoading.text = texto;
+
+        /// <summary>
+        /// Garante shutdown completo antes de StartHost/StartClient.
+        ///
+        /// FIX: aguarda ShutdownInProgress em vez de apenas 1 Task.Yield().
+        /// 1 frame era insuficiente — o Transport precisa de vários frames para
+        /// limpar buffers internos do Relay, causando estado residual entre sessões.
+        /// </summary>
+        private async Task ShutdownIfRunningAsync()
         {
-            _buttonCriarSala.interactable = value;
-            _buttonEntrar.interactable = value;
+            if (!NetworkManager.Singleton.IsListening) return;
+
+            Debug.Log("[LobbyController] Desligando NetworkManager anterior...");
+            NetworkManager.Singleton.Shutdown();
+
+            // Aguarda o shutdown completar (pode levar 10–30+ frames com Relay)
+            int maxFrames = 60; // timeout de segurança (~1s em 60fps)
+            while (NetworkManager.Singleton.ShutdownInProgress && maxFrames-- > 0)
+                await Task.Yield();
+
+            await Task.Yield(); // frame extra para buffers do Transport
+            await Task.Yield();
+
+            Debug.Log("[LobbyController] NetworkManager desligado.");
         }
     }
 }
