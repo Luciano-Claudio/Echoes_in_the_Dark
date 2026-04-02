@@ -18,8 +18,8 @@ namespace EchoesInTheDark.Services
     public class RelayNetworkService
     {
         private const int MAX_CONNECTIONS      = 15;
-        private const int JOIN_MAX_RETRIES     = 3;
-        private const int JOIN_RETRY_BASE_MS   = 1500; // 1.5s → 3s (backoff exponencial)
+        private const int JOIN_MAX_RETRIES     = 5;
+        private const int JOIN_RETRY_BASE_MS   = 2000; // 2s → 4s → 6s → 8s (backoff linear, ~20s total)
 
         // ── Host ──────────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ namespace EchoesInTheDark.Services
                 allocation.ConnectionData,
                 allocation.ConnectionData, // hostConnectionData = connectionData para o Host
                 allocation.Key,
-                isSecure: true             // DTLS obrigatório
+                isSecure: false            // UDP sem DTLS — mais estável no editor/MPPM
             ));
 
             Debug.Log($"[RelayNetworkService] Alocação criada. JoinCode: {joinCode}");
@@ -90,7 +90,7 @@ namespace EchoesInTheDark.Services
                         joinAllocation.ConnectionData,
                         joinAllocation.HostConnectionData, // diferente do Host: são os dados do Host remoto
                         joinAllocation.Key,
-                        isSecure: true
+                        isSecure: false    // UDP sem DTLS — deve coincidir com o modo do Host
                     ));
 
                     Debug.Log($"[RelayNetworkService] Relay configurado com sucesso na tentativa {attempt}.");

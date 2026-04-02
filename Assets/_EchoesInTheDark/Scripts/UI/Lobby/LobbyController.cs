@@ -147,9 +147,15 @@ namespace EchoesInTheDark.UI
                 await ShutdownIfRunningAsync();
 
                 string relayCode = await _relayService.CreateRelayAndGetJoinCode();
-                await _lobbyService.CreateLobby("EitD-Sala", relayCode);
 
+                // Inicia o Host ANTES de criar o Lobby para garantir que o Transport
+                // estabeleça o handshake com o Relay antes de o código ser exposto.
+                // FIX "join code not found": clientes não devem receber o código
+                // enquanto o Host não estiver conectado ao Relay server.
                 NetworkManager.Singleton.StartHost();
+                await WaitForHostRelayAsync();
+
+                await _lobbyService.CreateLobby("EitD-Sala", relayCode);
 
                 _lobbyCodeReal = _lobbyService.GetLobbyCode();
                 ConfigureSalaParaHost();
@@ -419,6 +425,33 @@ namespace EchoesInTheDark.UI
         }
 
         private void SetLoadingText(string texto) => _textLoading.text = texto;
+
+        /// <summary>
+        /// Aguarda o Host estabelecer conexão com o Relay Transport (handshake UDP).
+        ///
+        /// FIX "join code not found":
+        ///   StartHost() é não-bloqueante — o Transport leva alguns frames para completar
+        ///   o handshake com o Relay server. Se o Lobby for criado antes disso, clientes
+        ///   que lerem o código imediatamente receberão "join code not found" porque o
+        ///   Relay ainda não reconhece a alocação como ativa.
+        ///
+        ///   Usa OnServerStarted (dispara quando o NGO confirma o servidor) + delay extra
+        ///   para o handshake UDP do Transport (que ocorre após o NGO reportar início).
+        /// </summary>
+        private async Task WaitForHostRelayAsync()
+        {
+            var tcs = new System.Threading.Tasks.TaskCompletionSource<bool>();
+            void OnStarted() { tcs.TrySetResult(true); }
+            NetworkManager.Singleton.OnServerStarted += OnStarted;
+
+            // Timeout de segurança: se OnServerStarted não disparar em 5s, continua mesmo assim
+            await Task.WhenAny(tcs.Task, Task.Delay(5000));
+            NetworkManager.Singleton.OnServerStarted -= OnStarted;
+
+            // Aguarda handshake UDP do Relay Transport (ocorre após NGO reportar início)
+            await Task.Delay(1500);
+            Debug.Log("[LobbyController] Host conectado ao Relay. Criando Lobby...");
+        }
 
         /// <summary>
         /// Garante shutdown completo antes de StartHost/StartClient.

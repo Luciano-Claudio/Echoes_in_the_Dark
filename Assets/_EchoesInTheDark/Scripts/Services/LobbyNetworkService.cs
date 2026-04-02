@@ -58,14 +58,31 @@ namespace EchoesInTheDark.Services
 
         /// <summary>
         /// [CLIENT] Entra no Lobby pelo código e retorna o RelayJoinCode armazenado.
-        /// FIX: normaliza o lobbyCode antes de enviar ao SDK.
+        /// FIX 1: normaliza o lobbyCode antes de enviar ao SDK.
+        /// FIX 2: se já for membro (Relay falhou numa tentativa anterior), reconecta via GetLobbyAsync
+        ///        em vez de falhar com "player is already a member of the lobby".
         /// </summary>
         public async Task<string> JoinLobbyAndGetRelayCode(string lobbyCode)
         {
             // Lobby codes são case-insensitive no SDK, mas normalizamos por segurança
             lobbyCode = lobbyCode.Trim().ToUpper();
 
-            _currentLobby = await LobbyService.Instance.JoinLobbyByCodeAsync(lobbyCode);
+            try
+            {
+                _currentLobby = await LobbyService.Instance.JoinLobbyByCodeAsync(lobbyCode);
+            }
+            catch (LobbyServiceException e) when (e.Reason == LobbyExceptionReason.Conflict)
+            {
+                // Ocorre quando o Relay falhou numa tentativa anterior:
+                // o Lobby foi aceito mas o Transport não conectou — ao tentar de novo,
+                // o SDK rejeita porque o player já é membro.
+                // Solução: recarregar os dados do Lobby existente para recuperar o RelayCode.
+                Debug.LogWarning("[LobbyNetworkService] Já é membro do Lobby — recarregando dados para retry do Relay.");
+                if (_currentLobby == null)
+                    throw new System.Exception("Já membro do Lobby mas sem ID em cache para reconectar.", e);
+                _currentLobby = await LobbyService.Instance.GetLobbyAsync(_currentLobby.Id);
+            }
+
             string relayCode = _currentLobby.Data[KEY_RELAY_CODE].Value;
             Debug.Log($"[LobbyNetworkService] Entrou no Lobby. RelayCode: '{relayCode}'");
             return relayCode;
